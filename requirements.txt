@@ -1,0 +1,26 @@
+# code/requirements.txt
+# --- Core ---
+python-dotenv>=1.0.1
+pydantic>=2.6,<3.0
+rich>=13.7.0
+
+# --- FastAPI ---
+fastapi>=0.110.0
+uvicorn>=0.27.0
+
+# --- LangChain (new architecture) ---
+langchain>=0.2.14
+langchain-core>=0.2.36
+langchain-community>=0.2.12
+langchain-openai>=0.1.22
+
+# --- LLM / OpenRouter ---
+openai>=1.40.0
+
+# --- Vector / RAG ---
+pymilvus>=2.4.4
+sentence-transformers>=3.0.1
+
+# --- Utilities ---
+requests>=2.31.0
+tqdm>=4.66.0

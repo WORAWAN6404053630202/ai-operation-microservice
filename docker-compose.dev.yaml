@@ -1,0 +1,22 @@
+version: '3.9'
+
+services:
+  serve:
+    container_name: ${CONTAINER_NAME}
+    image: ${DOCKER_REPO_USER}/${IMAGE_NAME}:${IMAGE_VERSION}
+    platform: linux/amd64
+    build:
+      context: .
+      target: develop
+      dockerfile: ./Dockerfile
+    ports:
+      - "${PORT}:3000"
+    volumes:
+      - ./code:/app
+      
+    env_file:
+      - ./env.properties 
+    restart: unless-stopped
+
+networks:
+  import-fastapi-network:

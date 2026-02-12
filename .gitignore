@@ -1,0 +1,31 @@
+# ===== OS =====
+.DS_Store
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ===== Virtualenv =====
+venv/
+.venv/
+
+# ===== Secrets =====
+.env
+*.pem
+*.key
+env.properties
+
+# ===== Chroma / local vector store artifacts =====
+local_chroma/
+code/local_chroma/
+**/chroma.sqlite3
+**/*.bin
+
+# ===== Runtime state / sessions =====
+code/data/states/*.json
+code/sessions/*.json
+
+# ===== Logs =====
+*.log
