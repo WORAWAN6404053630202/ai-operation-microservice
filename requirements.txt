@@ -1,12 +1,11 @@
-# code/requirements.txt
 # --- Core ---
 python-dotenv>=1.0.1
 pydantic>=2.6,<3.0
 rich>=13.7.0
 
 # --- FastAPI ---
-fastapi>=0.110.0
-uvicorn>=0.27.0
+fastapi>=0.115.2,<1
+uvicorn>=0.27,<1
 
 # --- LangChain (new architecture) ---
 langchain>=0.2.14
@@ -19,10 +18,14 @@ openai>=1.40.0
 
 # --- Vector / RAG ---
 pymilvus>=2.4.4
-sentence-transformers>=3.0.1
+sentence-transformers>=3.0.1,<4
+transformers>=4.41.0,<5.0.0
+huggingface-hub>=0.23.0,<1.0
+
+# --- Web UI ---
+gradio>=6,<7
+gradio-client>=2,<3
 
 # --- Utilities ---
 requests>=2.31.0
 tqdm>=4.66.0
-
-gradio>=4.0.0
