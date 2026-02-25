@@ -6,7 +6,6 @@ from typing import Tuple, Dict, Any, List, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
-from utils.json_guard import call_llm_json_with_repair
 
 import conf
 from model.conversation_state import ConversationState
@@ -15,15 +14,36 @@ from utils.prompts_academic import SYSTEM_PROMPT as SYSTEM_PROMPT_ACADEMIC
 
 class AcademicPersonaService:
     """
-    Academic Persona (Agentic, detailed, original-like)
-    - Mirrors original AgentService flow (retrieve/ask/answer + topic_selection phase)
-    - Adds deterministic "choice binding" so user can reply with:
-      - single number: 2
-      - multi: 2,3 / 2 และ 3 / 2 3
-      - free-text: "เลือกข้อ 2" / "ข้อ2" / "ทั้งหมด"
+    Academic Persona (REQUIRED FLOW)
+    2.1 Retrieve -> ask REQUIRED SLOTS (single batch)
+    2.2 After slots -> ask which SECTIONS (dynamic; only what exists for this case)
+    3) Final answer (evidence-only; best-effort)
+    4) Mark done for supervisor auto-return
+
+    Production fixes in this file (P0/P1):
+    - ✅ Do NOT create academic_flow.stage="idle" automatically (prevents supervisor lock on "idle")
+    - ✅ Retrieve ONLY once when starting intake (store academic_question); never re-retrieve on slot replies
+    - ✅ Use academic_question for final prompt (never fallback to "1,2" etc.)
+    - ✅ Make force_intake meaningful: keep intake stage, re-ask slots on greeting/noise, never reset stage
+    - ✅ Stronger greeting/noise detection inside intake (backup safety)
     """
 
     persona_id = "academic"
+
+    # For parsing numbered options
+    _OPTION_LINE_RE = re.compile(r"(?m)^\s*(\d{1,2})\s*[\)\.\:]\s*(.+?)\s*$")
+
+    # Detect "ทั้งหมด"
+    _SELECT_ALL_RE = re.compile(r"(ทั้งหมด|ทุกข้อ|ทุกหัวข้อ|เอาทั้งหมด|all|everything)", re.IGNORECASE)
+
+    # Backup greeting/noise detection (should already be handled by supervisor, but keep safe)
+    _TH_LAUGH_RE = re.compile(r"^\s*5{3,}\s*$")
+    _EN_GREETING_RE = re.compile(r"^\s*(hi+|hello+|hey+|yo+)\b", re.IGNORECASE)
+    _EN_GOOD_TIME_RE = re.compile(r"^\s*good\s+(morning|afternoon|evening|night)\b", re.IGNORECASE)
+    _TH_SAWASDEE_FUZZY_RE = re.compile(r"^\s*สว[^\s]{0,6}ดี", re.IGNORECASE)
+    _TH_WATDEE_RE = re.compile(r"^\s*หวัดดี", re.IGNORECASE)
+    _FILLER_ONLY_RE = re.compile(r"^\s*(ครับ|คับ|ค่ะ|คะ|จ้า|จ้ะ|ค่า|งับ)\s*$", re.IGNORECASE)
+    _NOISE_ONLY_RE = re.compile(r"^\s*(?:[อ-ฮะ-์]+|[a-z]+|[!?.]+)\s*$", re.IGNORECASE)
 
     def __init__(self, retriever):
         self.retriever = retriever
@@ -41,17 +61,139 @@ class AcademicPersonaService:
         )
 
     # ----------------------------
-    # Choice binding helpers
+    # Safe append (dedupe)
     # ----------------------------
-    _OPTION_LINE_RE = re.compile(r"(?m)^\s*(\d{1,2})\s*[\)\.\:]\s*(.+?)\s*$")
+    def _append_user_once(self, state: ConversationState, content: str) -> None:
+        if content is None:
+            return
+        c = str(content)
+        if not c.strip():
+            return
+        if state.messages and state.messages[-1].get("role") == "user" and (state.messages[-1].get("content") or "") == c:
+            return
+        state.messages.append({"role": "user", "content": c})
 
+    def _append_assistant(self, state: ConversationState, content: str) -> None:
+        """
+        Safe assistant append:
+        - Avoid duplicate consecutive assistant messages
+        """
+        if content is None:
+            return
+        c = str(content).strip()
+        if not c:
+            return
+        state.messages = state.messages or []
+        if state.messages:
+            last = state.messages[-1]
+            if last.get("role") == "assistant" and (last.get("content") or "").strip() == c:
+                return
+        state.messages.append({"role": "assistant", "content": c})
+
+    # ----------------------------
+    # Context helpers (flow)
+    # ----------------------------
+    def _get_flow(self, state: ConversationState) -> Optional[Dict[str, Any]]:
+        """
+        IMPORTANT (P0):
+        - Do NOT create flow on read.
+        - Return None if flow not started yet.
+        """
+        state.context = state.context or {}
+        flow = state.context.get("academic_flow")
+        if isinstance(flow, dict) and str(flow.get("stage") or "").strip():
+            return flow
+        return None
+
+    def _ensure_flow(self, state: ConversationState, stage: str, **kwargs) -> Dict[str, Any]:
+        """
+        Create/overwrite flow only when we truly start intake or update a known stage.
+        """
+        state.context = state.context or {}
+        flow = state.context.get("academic_flow")
+        if not isinstance(flow, dict):
+            flow = {}
+        flow["stage"] = stage
+        flow.update(kwargs)
+        state.context["academic_flow"] = flow
+        return flow
+
+    def _set_flow(self, state: ConversationState, **kwargs) -> None:
+        """
+        Update flow if it exists; create only if 'stage' provided.
+        """
+        state.context = state.context or {}
+        flow = state.context.get("academic_flow")
+        if not isinstance(flow, dict):
+            flow = {}
+        if "stage" in kwargs and kwargs.get("stage"):
+            flow["stage"] = kwargs.get("stage")
+        for k, v in kwargs.items():
+            if k == "stage":
+                continue
+            flow[k] = v
+        # Only persist if stage is set (intake truly started)
+        if str(flow.get("stage") or "").strip():
+            state.context["academic_flow"] = flow
+
+    def _mark_done(self, state: ConversationState) -> None:
+        self._set_flow(state, stage="done")
+        state.context["auto_return_to_practical"] = True
+
+    # ----------------------------
+    # Greeting/noise (backup safety)
+    # ----------------------------
+    def _looks_like_greeting_or_noise(self, user_text: str) -> bool:
+        raw = (user_text or "").strip()
+        if not raw:
+            return True
+        if self._TH_LAUGH_RE.match(raw):
+            return True
+        if self._FILLER_ONLY_RE.match(raw):
+            return True
+        low = raw.lower().strip()
+        if self._EN_GREETING_RE.match(low) or self._EN_GOOD_TIME_RE.match(low):
+            return True
+        if self._TH_WATDEE_RE.match(raw) or self._TH_SAWASDEE_FUZZY_RE.match(raw):
+            return True
+        if len(raw) <= 14 and self._NOISE_ONLY_RE.match(raw):
+            return True
+        return False
+
+    # ----------------------------
+    # Retrieval (only once per intake)
+    # ----------------------------
+    def _retrieve_docs(self, query: str) -> List[Dict[str, Any]]:
+        docs = self.retriever.invoke(query)
+        results: List[Dict[str, Any]] = []
+        for d in (docs or [])[: int(getattr(conf, "RETRIEVAL_TOP_K", 20) or 20)]:
+            results.append(
+                {
+                    "content": (getattr(d, "page_content", "") or "")[:600],
+                    "metadata": getattr(d, "metadata", {}) or {},
+                }
+            )
+        return results
+
+    def _start_intake_with_retrieval(self, state: ConversationState, user_question: str) -> None:
+        """
+        P0: Retrieve only here (once), store academic_question, set last_retrieval_query.
+        """
+        q = (user_question or "").strip()
+        if not q:
+            q = "กฎหมายร้านอาหาร ใบอนุญาต ภาษี VAT จดทะเบียน สุขาภิบาล ประกันสังคม"
+
+        state.context = state.context or {}
+        state.context["academic_question"] = q
+
+        state.current_docs = self._retrieve_docs(q)
+        state.last_retrieval_query = q
+        state.context["last_retrieval_query"] = q
+
+    # ----------------------------
+    # Option parsing / binding
+    # ----------------------------
     def _extract_numbered_options(self, text: str) -> Dict[int, str]:
-        """
-        Extract numbered options from assistant question like:
-          1) aaa
-          2) bbb
-        Returns {1: "aaa", 2:"bbb"}.
-        """
         options: Dict[int, str] = {}
         for m in self._OPTION_LINE_RE.finditer(text or ""):
             try:
@@ -63,106 +205,183 @@ class AcademicPersonaService:
                 continue
         return options
 
-    def _parse_user_selection_numbers(self, user_text: str) -> Optional[List[int]]:
-        """
-        Parse selection numbers from user text.
-        Supports: "2", "ข้อ 2", "2,3", "2 และ 3", "2 3", "เลือก 2"
-        Returns list[int] or None if not a clear numeric selection.
-        """
-        t = (user_text or "").strip()
-        if not t:
-            return None
-
-        # quick reject: if it's long free-text without digits, let LLM handle
-        if not re.search(r"\d", t):
-            return None
-
-        nums = [int(x) for x in re.findall(r"\d{1,2}", t)]
+    def _parse_numbers(self, user_text: str) -> List[int]:
+        if not user_text:
+            return []
+        nums = [int(x) for x in re.findall(r"\d{1,2}", user_text)]
         nums = [n for n in nums if 0 < n < 100]
-        return nums or None
+        seen = set()
+        out = []
+        for n in nums:
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+        return out
 
     def _is_select_all(self, user_text: str) -> bool:
-        t = (user_text or "").strip().lower()
-        if not t:
-            return False
-        # Thai + common variants
-        keywords = [
-            "ทั้งหมด", "ทุกข้อ", "ทุกหัวข้อ", "เอาทุกข้อ", "เอาทั้งหมด",
-            "all", "everything", "both",
-        ]
-        return any(k in t for k in keywords)
+        return bool(self._SELECT_ALL_RE.search(user_text or ""))
 
-    def _apply_choice_binding(
-        self,
-        state: ConversationState,
-        user_input: str,
-        last_bot: str
-    ) -> Tuple[str, Dict[str, Any]]:
+    def _bind_choice_if_any(self, state: ConversationState, user_text: str) -> Dict[str, Any]:
         """
-        If last assistant message had numbered options and user replies with selection,
-        convert user input into a resolved text to reduce LLM confusion.
-        Returns: (user_input_for_prompt, debug_binding_info)
+        Generic binder for both stages (slots & sections).
+        Uses state.context["pending_options"] generated by the bot question.
         """
         ctx = state.context or {}
-        pending_options = ctx.get("pending_options") or {}
+        pending = ctx.get("pending_options") or {}
+        if not isinstance(pending, dict) or not pending:
+            return {"bound": False}
 
-        # If we don't already have pending options, try extracting from last_bot now (safer).
-        if not pending_options and last_bot:
-            extracted = self._extract_numbered_options(last_bot)
-            if len(extracted) >= 2:
-                pending_options = extracted
-                ctx["pending_options"] = pending_options
-                ctx["pending_question"] = last_bot
-
-        if not pending_options:
-            return user_input, {"bound": False}
-
-        # "ทั้งหมด" / "all"
-        if self._is_select_all(user_input):
-            ctx["resolved_selection"] = {
-                "type": "all",
-                "selected": sorted(list(pending_options.keys())),
-                "resolved": [f"{k}) {pending_options[k]}" for k in sorted(pending_options.keys())],
-            }
-            # Clear pending to avoid accidental reuse
+        if self._is_select_all(user_text):
+            keys = sorted([int(k) for k in pending.keys() if str(k).isdigit()])
+            resolved = [f"{k}) {pending.get(k)}" for k in keys]
+            ctx["resolved_selection"] = {"type": "all", "selected": keys, "resolved": resolved, "raw": user_text}
             ctx["pending_options"] = {}
             ctx["pending_question"] = ""
             state.context = ctx
-            injected = "ผู้ใช้เลือก: ทั้งหมด (ทุกข้อ)"
-            return injected, {"bound": True, "mode": "all"}
+            return {"bound": True, "mode": "all", "selected": keys}
 
-        nums = self._parse_user_selection_numbers(user_input)
+        nums = self._parse_numbers(user_text)
         if not nums:
-            return user_input, {"bound": False}
+            return {"bound": False}
 
-        # Keep only valid selections
-        valid = [n for n in nums if n in pending_options]
+        valid = [n for n in nums if n in pending]
         if not valid:
-            # user typed numbers but not matching options -> don't clear pending; let LLM ask again
-            return user_input, {"bound": False, "reason": "numbers_not_in_options"}
+            return {"bound": False, "reason": "numbers_not_in_options"}
 
-        # De-dup preserve order
-        seen = set()
-        valid = [n for n in valid if (n not in seen and not seen.add(n))]
-
-        resolved_lines = [f"{n}) {pending_options[n]}" for n in valid]
-        ctx["resolved_selection"] = {
-            "type": "numbers",
-            "selected": valid,
-            "resolved": resolved_lines,
-            "raw": user_input,
-        }
-
-        # Clear pending to avoid binding future turns accidentally
+        resolved = [f"{n}) {pending[n]}" for n in valid]
+        ctx["resolved_selection"] = {"type": "numbers", "selected": valid, "resolved": resolved, "raw": user_text}
         ctx["pending_options"] = {}
         ctx["pending_question"] = ""
         state.context = ctx
-
-        injected = "ผู้ใช้เลือกข้อ: " + " | ".join(resolved_lines)
-        return injected, {"bound": True, "mode": "numbers", "selected": valid}
+        return {"bound": True, "mode": "numbers", "selected": valid}
 
     # ----------------------------
-    # Core methods
+    # Stage 2.1: required slots question (single batch)
+    # ----------------------------
+    def _ask_required_slots(self, state: ConversationState) -> str:
+        msg = (
+            "เพื่อให้ตอบได้ตรงกรณี รบกวนตอบ “ข้อมูลจำเป็น” ต่อไปนี้รวดเดียวครับ (ตอบเท่าที่รู้)\n"
+            "1) ที่ตั้งร้าน/กิจการ: 1) กทม.  2) ต่างจังหวัด (ระบุจังหวัด)\n"
+            "2) รูปแบบผู้ประกอบการ: 1) บุคคลธรรมดา  2) นิติบุคคล\n"
+            "3) ลักษณะกิจการแบบย่อ: เช่น ร้านอาหารทั่วไป/คาเฟ่/บุฟเฟ่ต์/ผับบาร์/เดลิเวอรี่เท่านั้น\n"
+            "4) เขต/อำเภอ/เทศบาล (ถ้าทราบ)\n"
+            "5) สถานะปัจจุบัน: เคยมีใบอนุญาต/จดทะเบียนแล้วหรือยัง (ถ้ารู้)"
+        )
+
+        opts = self._extract_numbered_options(msg)
+        if len(opts) >= 2:
+            state.context["pending_options"] = opts
+            state.context["pending_question"] = msg
+        else:
+            state.context["pending_options"] = {}
+            state.context["pending_question"] = ""
+
+        self._set_flow(state, stage="awaiting_slots")
+        return msg
+
+    def _save_slots_best_effort(self, state: ConversationState, user_text: str, bind_info: Dict[str, Any]) -> None:
+        ctx = state.context or {}
+        slots = ctx.get("academic_slots")
+        if not isinstance(slots, dict):
+            slots = {}
+
+        slots["raw"] = (user_text or "").strip()
+
+        if bind_info.get("bound") and bind_info.get("mode") == "numbers":
+            slots["selected_numbers"] = bind_info.get("selected") or []
+
+        ctx["academic_slots"] = slots
+        state.context = ctx
+
+    # ----------------------------
+    # Stage 2.2: dynamic section menu (only what exists)
+    # ----------------------------
+    def _available_sections_from_docs(self, state: ConversationState) -> List[Dict[str, str]]:
+        docs = state.current_docs or []
+
+        def has_any_anykey(keys: List[str]) -> bool:
+            for d in docs:
+                md = (d.get("metadata") or {})
+                for key in keys:
+                    val = md.get(key)
+                    if val is None:
+                        continue
+                    s = str(val).strip()
+                    if s and s.lower() != "nan":
+                        return True
+            return False
+
+        candidates = [
+            (["operation_steps", "operation_step", "steps", "procedure", "ขั้นตอนการดำเนินการ"], "ขั้นตอนการดำเนินการ"),
+            (["identification_documents", "documents", "required_documents", "เอกสาร ยืนยันตัวตน", "เอกสารที่ต้องใช้"], "เอกสารที่ต้องใช้"),
+            (["fees", "fee", "ค่าธรรมเนียม"], "ค่าธรรมเนียม"),
+            (["operation_duration", "duration", "ระยะเวลา การดำเนินการ", "ระยะเวลาดำเนินการ"], "ระยะเวลา"),
+            (["service_channel", "channel", "ช่องทางการ ให้บริการ", "ช่องทาง", "หน่วยงาน", "department"], "ช่องทาง/สถานที่ยื่น"),
+            (["terms_and_conditions", "conditions", "เงื่อนไขและหลักเกณฑ์"], "เงื่อนไขและหลักเกณฑ์"),
+            (["legal_regulatory", "law", "regulation", "ข้อกำหนดทางกฎหมาย และข้อบังคับ", "บทลงโทษ"], "ข้อกฎหมาย/ข้อควรระวัง/บทลงโทษ"),
+        ]
+
+        out: List[Dict[str, str]] = []
+        for keys, label in candidates:
+            if has_any_anykey(keys):
+                out.append({"key": keys[0], "label": label})
+        return out
+
+    def _ask_sections(self, state: ConversationState) -> str:
+        sections = self._available_sections_from_docs(state)
+
+        if not sections:
+            state.context["selected_sections"] = {"type": "all", "keys": []}
+            self._set_flow(state, stage="awaiting_sections")
+            return ""
+
+        lines = ["ก่อนสรุปคำตอบ คุณอยากรู้ “ส่วนไหน” ครับ (เลือกได้หลายข้อ/หรือพิมพ์ “ทั้งหมด”)"]
+        opts: Dict[int, str] = {}
+        for i, sec in enumerate(sections, start=1):
+            opts[i] = sec["label"]
+            lines.append(f"{i}) {sec['label']}")
+
+        msg = "\n".join(lines)
+
+        state.context["section_catalog"] = sections
+        state.context["pending_options"] = opts
+        state.context["pending_question"] = msg
+        self._set_flow(state, stage="awaiting_sections")
+        return msg
+
+    def _save_selected_sections(self, state: ConversationState, user_text: str, bind_info: Dict[str, Any]) -> None:
+        ctx = state.context or {}
+        catalog = ctx.get("section_catalog") or []
+        if not isinstance(catalog, list):
+            catalog = []
+
+        if self._is_select_all(user_text) or (bind_info.get("bound") and bind_info.get("mode") == "all"):
+            ctx["selected_sections"] = {"type": "all", "keys": [c.get("key") for c in catalog if c.get("key")]}
+            state.context = ctx
+            return
+
+        nums = bind_info.get("selected") if bind_info.get("bound") and bind_info.get("mode") == "numbers" else []
+        if not nums:
+            ctx["selected_sections"] = {"type": "all", "keys": [c.get("key") for c in catalog if c.get("key")]}
+            state.context = ctx
+            return
+
+        picked: List[str] = []
+        for n in nums:
+            idx = int(n) - 1
+            if 0 <= idx < len(catalog):
+                k = catalog[idx].get("key")
+                if k:
+                    picked.append(k)
+
+        if not picked:
+            picked = [c.get("key") for c in catalog if c.get("key")]
+
+        ctx["selected_sections"] = {"type": "picked", "keys": picked}
+        state.context = ctx
+
+    # ----------------------------
+    # Final answer generation (LLM JSON)
     # ----------------------------
     def _call_llm_json(self, prompt: str, max_retries: int = 2) -> dict:
         last_err = None
@@ -174,7 +393,6 @@ class AcademicPersonaService:
                 if getattr(conf, "DEBUG_LATENCY", True):
                     print(f"[LATENCY] llm_ms={(t1 - t0) * 1000:.0f} prompt_chars={len(prompt)}")
 
-                # strip fences if any
                 if "```json" in text:
                     text = text.split("```json")[1].split("```")[0].strip()
                 elif "```" in text:
@@ -191,89 +409,19 @@ class AcademicPersonaService:
 
         return {
             "input_type": "new_question",
-            "analysis": "Parse error",
-            "action": "ask",
+            "analysis": "LLM JSON parse failed",
+            "action": "answer",
             "execution": {
-                "question": "ขอโทษครับ ระบบมีปัญหาชั่วคราว รบกวนถามใหม่อีกครั้งได้ไหมครับ",
-                "context_update": {},
+                "answer": "ขอโทษครับ ตอนนี้ยังสรุปคำตอบที่ยืนยันได้จากเอกสารไม่ได้",
+                "context_update": {"auto_return_to_practical": True},
             },
         }
 
-    def _retrieve_docs(self, query: str) -> List[Dict[str, Any]]:
-        docs = self.retriever.invoke(query)
-        results: List[Dict[str, Any]] = []
-        for d in docs[: getattr(conf, "RETRIEVAL_TOP_K", 20)]:
-            results.append(
-                {
-                    "content": (getattr(d, "page_content", "") or "")[:600],
-                    "metadata": getattr(d, "metadata", {}) or {},
-                }
-            )
-        return results
-    
-    # ----------------------------
-    # Output sanitizer (no internal ids)
-    # ----------------------------
-    _ROW_ID_RE = re.compile(r"\brow[_\s-]*id\s*[:=]?\s*\d+(?:\s*,\s*\d+)*", re.IGNORECASE)
-    _DOC_ID_RE = re.compile(r"\b(doc(?:ument)?[_\s-]*id|uuid|chroma[_\s-]*id)\s*[:=]?\s*[a-f0-9-]{6,}\b", re.IGNORECASE)
-    _REF_GROUP_RE = re.compile(r"(อ้างอิง|อิงจาก|อ้างถึง)\s*(เอกสาร|ข้อมูล)\s*(กลุ่ม|หมายเลข|ชุด)?\s*[:：]?\s*.*", re.IGNORECASE)
+    def _build_final_prompt(self, state: ConversationState, user_question: str) -> str:
+        ctx = state.context or {}
+        slots = ctx.get("academic_slots") or {}
+        selected = ctx.get("selected_sections") or {"type": "all", "keys": []}
 
-    def _sanitize_answer(self, text: str) -> str:
-        """
-        Remove internal references like row_id/doc_id/uuid and 'อ้างอิงเอกสารกลุ่ม ...'
-        Keep answer professional.
-        """
-        t = (text or "").strip()
-        if not t:
-            return t
-
-        # Remove row_id mentions
-        t = self._ROW_ID_RE.sub("", t)
-
-        # Remove doc/uuid/chroma id mentions
-        t = self._DOC_ID_RE.sub("", t)
-
-        # Remove overly-internal "reference group" lines (best-effort: drop the whole line)
-        lines = [ln.rstrip() for ln in t.splitlines()]
-        kept = []
-        for ln in lines:
-            ln2 = ln.strip()
-            if not ln2:
-                kept.append(ln)
-                continue
-            # Drop lines that are basically internal citation lines
-            if self._REF_GROUP_RE.fullmatch(ln2):
-                continue
-            if "row_id" in ln2.lower() or "doc_id" in ln2.lower() or "uuid" in ln2.lower():
-                continue
-            kept.append(ln)
-
-        t = "\n".join([x for x in kept]).strip()
-
-        # Clean repeated blank lines
-        t = re.sub(r"\n{3,}", "\n\n", t).strip()
-
-        return t
-
-    def handle(self, state: ConversationState, user_input: str, _internal: bool = False) -> Tuple[ConversationState, str]:
-        state.context = state.context or {}
-        state.persona_id = self.persona_id
-
-        # store message
-        if not _internal:
-            state.messages.append({"role": "user", "content": user_input})
-
-        user_text = (user_input or "").strip()
-
-        # keep last assistant message
-        last_bot = next((m["content"] for m in reversed(state.messages[:-1]) if m["role"] == "assistant"), "")
-        recent_msgs = state.messages[-15:]
-
-        # ---- choice binding (critical fix) ----
-        # If user replied with "2" (or similar) to the previous numbered list, resolve it before LLM sees it.
-        user_input_for_prompt, bind_info = self._apply_choice_binding(state, user_input, last_bot)
-
-        # pack docs (send metadata + small content hint)
         docs_json = []
         for d in (state.current_docs or [])[:20]:
             md = d.get("metadata", {}) or {}
@@ -284,105 +432,142 @@ class AcademicPersonaService:
                 }
             )
 
-        special_phase_note = ""
-        if state.context.get("phase") == "topic_selection":
-            special_phase_note = """
-IMPORTANT (PHASE: TOPIC SELECTION):
-The user input is NOT a new question.
-The user is selecting which topics they want to see after documents were already retrieved.
-
-You MAY retrieve again only if more documents are REQUIRED for the selected topics.
-But you MUST NOT retrieve repeatedly or enter a loop.
-After ONE additional retrieve (if needed), you MUST answer using CURRENT_DOCS.
-"""
-
-        prompt = f"""
+        return f"""
 {SYSTEM_PROMPT_ACADEMIC}
 
-{special_phase_note}
+USER_QUESTION:
+{user_question}
 
-USER INPUT (RAW):
-{user_input}
+SLOTS:
+{json.dumps(slots, ensure_ascii=False, indent=2)}
 
-USER INPUT (NORMALIZED / MAY INCLUDE RESOLVED CHOICE):
-{user_input_for_prompt}
-
-CHOICE_BINDING_DEBUG:
-{json.dumps(bind_info, ensure_ascii=False)}
-
-LAST ASSISTANT MESSAGE:
-{last_bot}
-
-RECENT MESSAGES:
-{json.dumps(recent_msgs, ensure_ascii=False, indent=2)}
-
-CURRENT CONTEXT:
-{json.dumps(state.context, ensure_ascii=False, indent=2)}
+SELECTED_SECTIONS:
+{json.dumps(selected, ensure_ascii=False, indent=2)}
 
 DOCUMENTS ({len(state.current_docs or [])} found):
 {json.dumps(docs_json, ensure_ascii=False, indent=2)}
 
-ROUND: {int(getattr(state, "round", 0) or 0)}/{int(getattr(conf, "MAX_ROUNDS", 7) or 7)}
+Return JSON:
+""".strip()
 
-Your JSON response:
-"""
+    # ----------------------------
+    # ENTRYPOINT
+    # ----------------------------
+    def handle(
+        self,
+        state: ConversationState,
+        user_input: str,
+        force_intake: bool = False,
+        _internal: bool = False,
+    ) -> Tuple[ConversationState, str]:
+        state.context = state.context or {}
+        state.persona_id = self.persona_id
 
-        decision = self._call_llm_json(prompt)
-        action = (decision.get("action") or "ask").strip()
-        exec_ = decision.get("execution", {}) or {}
+        # DEDUPE: supervisor already appends user; but allow standalone usage too
+        if not _internal:
+            self._append_user_once(state, user_input)
 
-        # INFINITE LOOP PREVENTION (topic_selection)
-        if state.context.get("phase") == "topic_selection" and action == "retrieve":
-            if not state.context.get("topic_retrieved_once"):
-                state.context["topic_retrieved_once"] = True
-            else:
-                action = "answer"
+        user_text = (user_input or "").strip()
 
-        if action == "retrieve":
-            q = exec_.get("query") or user_text or user_input
-            state.current_docs = self._retrieve_docs(q)
-            return self.handle(state, "__auto_post_retrieve__", _internal=True)
+        flow = self._get_flow(state)
+        stage = (flow.get("stage") if isinstance(flow, dict) else "") or ""
 
-        if action == "ask":
-            question = (exec_.get("question") or "ต้องการทราบเรื่องใดเป็นหลักครับ").strip()
-            state.messages.append({"role": "assistant", "content": question})
+        # -----------------------
+        # Start intake (NO implicit idle stage)
+        # -----------------------
+        if not stage:
+            # If we were force-routed here but got greeting/noise/blank -> ask for question (no flow created)
+            if force_intake and self._looks_like_greeting_or_noise(user_text):
+                msg = "อยากให้ช่วยเรื่องไหนเกี่ยวกับกฎหมาย/ขั้นตอนของร้านอาหารครับ"
+                self._append_assistant(state, msg)
+                return state, msg
 
-            # phase hook (keep same as original behavior)
-            if "ตอนนี้โคโค่มีข้อมูลครบแล้ว" in question:
-                state.context["phase"] = "topic_selection"
-                state.context["topic_retrieved_once"] = False
+            # If there's a real question -> start intake + retrieve once
+            if user_text:
+                self._ensure_flow(state, stage="awaiting_slots")
+                self._start_intake_with_retrieval(state, user_question=user_text)
 
-            # store pending options if question contains a numbered list
-            opts = self._extract_numbered_options(question)
-            if len(opts) >= 2:
-                state.context["pending_options"] = opts
-                state.context["pending_question"] = question
-            else:
-                # don't keep stale pending options
-                state.context["pending_options"] = {}
-                state.context["pending_question"] = ""
+                q = self._ask_required_slots(state)
+                self._append_assistant(state, q)
+                state.round = int(getattr(state, "round", 0) or 0) + 1
+                return state, q
 
-            if isinstance(exec_.get("context_update", {}), dict):
-                state.context.update(exec_.get("context_update", {}))
+            # no question
+            msg = "อยากให้ช่วยเรื่องไหนเกี่ยวกับกฎหมาย/ขั้นตอนของร้านอาหารครับ"
+            self._append_assistant(state, msg)
+            return state, msg
 
-            state.round = int(getattr(state, "round", 0) or 0) + 1
-            return state, question
+        # Refresh stage after potential creation
+        flow = self._get_flow(state) or {}
+        stage = (flow.get("stage") or "").strip()
 
-        if action == "answer":
-            ans = (exec_.get("answer") or "").strip() or "ขอโทษครับ ตอนนี้ยังไม่พบข้อมูลที่ยืนยันได้ในเอกสาร"
+        # -----------------------
+        # Stage: awaiting_slots
+        # -----------------------
+        if stage == "awaiting_slots":
+            # force_intake: greeting/noise must re-ask slots and keep stage (no reset)
+            if force_intake and self._looks_like_greeting_or_noise(user_text):
+                q = self._ask_required_slots(state)
+                self._append_assistant(state, q)
+                return state, q
 
-            # IMPORTANT: sanitize internal ids/citations
-            ans = self._sanitize_answer(ans)
+            bind = self._bind_choice_if_any(state, user_text)
 
-            state.messages.append({"role": "assistant", "content": ans})
+            # If empty/garbage -> re-ask
+            if not user_text or (not bind.get("bound") and self._looks_like_greeting_or_noise(user_text)):
+                q = self._ask_required_slots(state)
+                self._append_assistant(state, q)
+                return state, q
 
-            state.context["phase"] = None
-            state.context["topic_retrieved_once"] = False
+            # Otherwise treat as slot answer (do NOT retrieve again here)
+            self._save_slots_best_effort(state, user_text, bind)
+
+            q2 = self._ask_sections(state)
+            if q2.strip():
+                self._append_assistant(state, q2)
+                state.round = int(getattr(state, "round", 0) or 0) + 1
+                return state, q2
+
+            # No sections available -> still proceed to awaiting_sections to finalize
+            self._set_flow(state, stage="awaiting_sections")
+
+        # -----------------------
+        # Stage: awaiting_sections -> final answer
+        # -----------------------
+        if (self._get_flow(state) or {}).get("stage") == "awaiting_sections":
+            bind = self._bind_choice_if_any(state, user_text)
+            self._save_selected_sections(state, user_text, bind)
+
+            # P0: Always use academic_question (never use "1,2" slot reply)
+            uq = (state.context or {}).get("academic_question") or state.last_retrieval_query or state.context.get("last_retrieval_query") or ""
+            uq = (uq or "").strip() or "กฎหมายร้านอาหาร ใบอนุญาต ภาษี VAT จดทะเบียน สุขาภิบาล ประกันสังคม"
+
+            prompt = self._build_final_prompt(state, user_question=uq)
+            decision = self._call_llm_json(prompt)
+
+            ex = (decision.get("execution") or {})
+            ans = (ex.get("answer") or "").strip()
+            if not ans:
+                ans = "ขอโทษครับ ตอนนี้ยังไม่พบข้อมูลที่ยืนยันได้ในเอกสาร"
+
+            # apply context update if any
+            cu = ex.get("context_update", {})
+            if isinstance(cu, dict) and cu:
+                state.context.update(cu)
+
+            # mark done (for supervisor auto-return)
+            self._mark_done(state)
+
+            # clean transient
             state.context["pending_options"] = {}
             state.context["pending_question"] = ""
+            state.context.pop("resolved_selection", None)
+
+            self._append_assistant(state, ans)
             state.round = 0
             return state, ans
 
+        # Stage done or unknown: provide safe fallback
         fallback = "ขอโทษครับ ผมยังไม่เข้าใจ รบกวนอธิบายเพิ่มอีกนิดได้ไหมครับ"
-        state.messages.append({"role": "assistant", "content": fallback})
+        self._append_assistant(state, fallback)
         return state, fallback

@@ -11,21 +11,45 @@ __pycache__/
 venv/
 .venv/
 
+# ===== IDE =====
+.vscode/
+.idea/
+
 # ===== Secrets =====
 .env
 *.pem
 *.key
 env.properties
 
+# ===== ML / HuggingFace Cache =====
+.cache/
+**/.cache/
+
+# ===== Chroma / local vector store artifacts =====
 # ===== Chroma / local vector store artifacts =====
 local_chroma/
 code/local_chroma/
+code/local_chroma_v2/
 **/chroma.sqlite3
 **/*.bin
+*.db
+*.sqlite3
 
 # ===== Runtime state / sessions =====
 code/data/states/*.json
 code/sessions/*.json
 
+# ===== Pytest / Coverage =====
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
 # ===== Logs =====
 *.log
+
+# ===== Temp =====
+*.swp
+*.swo
+
+

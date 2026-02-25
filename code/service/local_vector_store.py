@@ -21,6 +21,11 @@ def _stringify_metadata(metadata: dict) -> dict:
 class LocalVectorStoreManager:
     """
     Local-only VectorStore manager using Chroma
+
+    NOTE (production boundary):
+    - This layer is infra only: it should NOT implement policy (reuse/new-topic).
+      Policy belongs to PersonaSupervisor / persona services.
+    - This layer can provide "raw docs" retrieval for academic quality if needed.
     """
 
     def __init__(self):
@@ -110,11 +115,45 @@ class LocalVectorStoreManager:
 
         return self._build_retriever()
 
-    def retrieve_docs(self, query: str) -> List[Dict]:
+    # ------------------------------------------------------------------
+    # Retrieval helpers (infra-only)
+    # ------------------------------------------------------------------
+    def retrieve_raw_docs(self, query: str, k: Optional[int] = None) -> List[Document]:
+        """
+        Return LangChain Document objects (full page_content; metadata as-is).
+        Useful for academic final answer or downstream post-processing.
+
+        NOTE: No clipping here. Consumers decide how much to include.
+        """
+        if not query or not str(query).strip():
+            return []
         if not self.retriever:
             raise RuntimeError("Retriever not initialized yet.")
-        docs = self.retriever.invoke(query)
-        return [{"content": doc.page_content[:600], "metadata": doc.metadata or {}} for doc in docs]
+
+        if k and int(k) > 0 and self.vectorstore is not None:
+            # build a one-off retriever with different k (no policy)
+            tmp = self.vectorstore.as_retriever(search_kwargs={"k": int(k)})
+            docs = tmp.invoke(query)
+        else:
+            docs = self.retriever.invoke(query)
+
+        return list(docs or [])
+
+    def retrieve_docs(self, query: str, k: Optional[int] = None, clip_chars: int = 600) -> List[Dict]:
+        """
+        Backward-compatible helper: returns list[dict] with clipped content.
+        Still infra-only. No policy (reuse/new-topic) is applied here.
+        """
+        docs = self.retrieve_raw_docs(query, k=k)
+        out: List[Dict] = []
+        for doc in docs:
+            out.append(
+                {
+                    "content": (getattr(doc, "page_content", "") or "")[: int(clip_chars or 600)],
+                    "metadata": getattr(doc, "metadata", {}) or {},
+                }
+            )
+        return out
 
 
 _MANAGER = LocalVectorStoreManager()
@@ -123,6 +162,7 @@ _MANAGER = LocalVectorStoreManager()
 def get_retriever(k: int = 0, fail_if_empty: bool = True):
     """
     Public API for local usage.
+    Returns a LangChain retriever (infra only).
     """
     if _MANAGER.retriever is not None:
         if k and int(k) > 0 and _MANAGER.vectorstore is not None:
@@ -135,6 +175,27 @@ def get_retriever(k: int = 0, fail_if_empty: bool = True):
         _MANAGER._build_retriever(k=int(k))
 
     return _MANAGER.retriever
+
+
+def retrieve_raw_docs(query: str, k: int = 0, fail_if_empty: bool = True) -> List[Document]:
+    """
+    Convenience function (optional): retrieve full Documents without clipping.
+    Keeps infra/policy separation: caller decides *when* to call this.
+    """
+    if _MANAGER.retriever is None:
+        _MANAGER.connect_to_existing(fail_if_empty=fail_if_empty)
+    kk = int(k) if k and int(k) > 0 else None
+    return _MANAGER.retrieve_raw_docs(query, k=kk)
+
+
+def retrieve_docs(query: str, k: int = 0, clip_chars: int = 600, fail_if_empty: bool = True) -> List[Dict]:
+    """
+    Convenience function: retrieve dict docs with clipping.
+    """
+    if _MANAGER.retriever is None:
+        _MANAGER.connect_to_existing(fail_if_empty=fail_if_empty)
+    kk = int(k) if k and int(k) > 0 else None
+    return _MANAGER.retrieve_docs(query, k=kk, clip_chars=clip_chars)
 
 
 def ingest_documents(documents: List[Document]):

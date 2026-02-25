@@ -49,8 +49,25 @@ def extract_first_json_object(text: str) -> Optional[str]:
         return None
 
     depth = 0
+    in_str = False
+    esc = False
     for i in range(start, len(t)):
         ch = t[i]
+
+        # track strings to avoid counting braces inside strings
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        else:
+            if ch == '"':
+                in_str = True
+                continue
+
         if ch == "{":
             depth += 1
         elif ch == "}":
@@ -76,9 +93,47 @@ def parse_json_safely(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
         return None, candidate
 
 
+# ----------------------------
+# Schema reminders (minimal per use-case)
+# ----------------------------
+SCHEMA_REMINDER_PRACTICAL_AGENT = """
+{
+  "input_type": "greeting | new_question | follow_up",
+  "analysis": "",
+  "action": "retrieve | ask | answer",
+  "execution": {
+    "context_update": {}
+  }
+}
+""".strip()
+
+SCHEMA_REMINDER_ACADEMIC_ANSWER = """
+{
+  "input_type": "new_question | follow_up",
+  "analysis": "",
+  "action": "answer",
+  "execution": {
+    "answer": "",
+    "context_update": { "auto_return_to_practical": true }
+  }
+}
+""".strip()
+
+# Backward-compatible default (kept, but now points to the practical/minimal schema)
+DEFAULT_SCHEMA_REMINDER = SCHEMA_REMINDER_PRACTICAL_AGENT
+
+
 def validate_agent_json(obj: Dict[str, Any]) -> Tuple[bool, str]:
     """
     Lightweight schema validation for your agent contract.
+
+    Notes:
+    - Tolerant with execution fields that are not used by the chosen action.
+    - Requires the action-specific field to exist and be a string:
+        retrieve -> execution.query (str, non-empty recommended but not required)
+        ask      -> execution.question (str)
+        answer   -> execution.answer (str)
+    - context_update is optional but must be an object if present.
     """
     if not isinstance(obj, dict):
         return False, "not_a_dict"
@@ -88,7 +143,8 @@ def validate_agent_json(obj: Dict[str, Any]) -> Tuple[bool, str]:
         if k not in obj:
             return False, f"missing_top_level:{k}"
 
-    if not isinstance(obj.get("execution"), dict):
+    ex = obj.get("execution")
+    if not isinstance(ex, dict):
         return False, "execution_not_object"
 
     action = obj.get("action")
@@ -96,22 +152,33 @@ def validate_agent_json(obj: Dict[str, Any]) -> Tuple[bool, str]:
         return False, f"invalid_action:{action}"
 
     it = obj.get("input_type")
-    if it is not None and isinstance(it, str):
-        if it not in ALLOWED_INPUT_TYPES:
-            # not fatal, but keep strict to stabilize downstream
-            return False, f"invalid_input_type:{it}"
-    else:
+    if not isinstance(it, str):
         return False, "input_type_invalid"
+    if it not in ALLOWED_INPUT_TYPES:
+        return False, f"invalid_input_type:{it}"
 
-    # Ensure execution has the expected field for the action
-    ex = obj.get("execution") or {}
-    if action == "retrieve" and not isinstance(ex.get("query", ""), str):
-        return False, "retrieve_missing_query"
-    if action == "ask" and not isinstance(ex.get("question", ""), str):
-        return False, "ask_missing_question"
-    if action == "answer" and not isinstance(ex.get("answer", ""), str):
+    # analysis must exist; allow empty string, but require string type
+    if not isinstance(obj.get("analysis"), str):
+        return False, "analysis_invalid"
+
+    # context_update optional but if present must be dict
+    if "context_update" in ex and not isinstance(ex.get("context_update"), dict):
+        return False, "context_update_not_object"
+
+    # Action-specific required field (tolerant with extra fields)
+    if action == "retrieve":
+        if "query" not in ex or not isinstance(ex.get("query"), str):
+            return False, "retrieve_missing_query"
+        return True, "ok"
+
+    if action == "ask":
+        if "question" not in ex or not isinstance(ex.get("question"), str):
+            return False, "ask_missing_question"
+        return True, "ok"
+
+    # action == "answer"
+    if "answer" not in ex or not isinstance(ex.get("answer"), str):
         return False, "answer_missing_answer"
-
     return True, "ok"
 
 
@@ -132,28 +199,17 @@ ERROR REASON:
 RULES:
 - Output MUST be valid JSON only.
 - No markdown. No extra text. No explanations.
-- Must match this schema exactly:
+- Must match this schema:
 {schema_reminder}
+
+IMPORTANT:
+- Use minimal fields required for the chosen action.
+- Do not add extra fields that are unrelated to the action.
 
 INVALID OUTPUT:
 {raw_text}
 
 Return the corrected JSON only:
-""".strip()
-
-
-DEFAULT_SCHEMA_REMINDER = """
-{
-  "input_type": "greeting | new_question | follow_up",
-  "analysis": "",
-  "action": "retrieve | ask | answer",
-  "execution": {
-    "query": "",
-    "question": "",
-    "answer": "",
-    "context_update": {}
-  }
-}
 """.strip()
 
 
@@ -185,7 +241,10 @@ def call_llm_json_with_repair(
             "input_type": "follow_up",
             "analysis": f"fallback_due_to:{reason}",
             "action": "ask",
-            "execution": {"question": "ขออภัยค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้งได้ไหมคะ", "context_update": {}},
+            "execution": {
+                "question": "ขออภัยค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้งได้ไหมคะ",
+                "context_update": {},
+            },
         }
 
     # attempt 2: repair
@@ -209,5 +268,8 @@ def call_llm_json_with_repair(
         "input_type": "follow_up",
         "analysis": f"fallback_due_to:{reason}",
         "action": "ask",
-        "execution": {"question": "ขออภัยค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้งได้ไหมคะ", "context_update": {}},
+        "execution": {
+            "question": "ขออภัยค่ะ ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้งได้ไหมคะ",
+            "context_update": {},
+        },
     }

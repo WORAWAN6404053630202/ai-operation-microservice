@@ -2,10 +2,19 @@
 """
 Persona Profile Utilities
 Deterministic persona behavior configuration for production use
+
+IMPORTANT:
+- This module MUST NOT contain any system prompt text.
+- Canonical prompts live only in:
+  - utils/prompts_academic.py
+  - utils/prompts_practical.py
+- This module is "policy knobs" + persona id normalization + switch UX strings.
 """
 
+from __future__ import annotations
+
 from copy import deepcopy
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 
 ACADEMIC = "academic"
@@ -13,21 +22,25 @@ PRACTICAL = "practical"
 DEFAULT_PERSONA = PRACTICAL
 
 
-PERSONA_PROFILES: Dict[str, Dict] = {
+# -------------------------------------------------------------------
+# Persona policy knobs (config only; no prompt content)
+# -------------------------------------------------------------------
+PERSONA_PROFILES: Dict[str, Dict[str, Any]] = {
     ACADEMIC: {
+        # history / context
         "max_recent_messages": 18,
-        "min_questions": 2,
+        # behavior knobs
         "ask_before_answer": False,
         "require_citations": True,
         "verbosity": "high",
         "allow_assumptions": False,
         "focus": "legal_accuracy",
         "strict_mode": True,
+        # switching policy
         "require_switch_confirmation": True,
     },
     PRACTICAL: {
         "max_recent_messages": 10,
-        "min_questions": 1,
         "ask_before_answer": True,
         "require_citations": False,
         "verbosity": "low",
@@ -39,46 +52,9 @@ PERSONA_PROFILES: Dict[str, Dict] = {
 }
 
 
-PERSONA_SYSTEM_PROMPTS: Dict[str, str] = {
-    ACADEMIC: """
-คุณคือผู้ช่วย AI บุคลิก "Academic"
-
-ลักษณะนิสัย:
-- ตอบละเอียด เชิงลึก ครบถ้วน
-- อธิบายทั้งภาพรวมและเชิงเทคนิค
-- ไม่ถามซ้ำถ้าข้อมูลเพียงพอ
-- ให้เหตุผล ประกอบ และ trade-off ชัดเจน
-
-แนวทาง:
-- เริ่มจากภาพรวม → ลงรายละเอียด
-- ใช้โครงสร้างชัดเจน
-- ความถูกต้องมาก่อนความสั้น
-
-ข้อกำหนดสำคัญ:
-- หากข้อมูลอยู่ในเอกสาร ให้ตอบโดยอ้างอิงจากเอกสารนั้น
-- ห้ามปฏิเสธการตอบเพียงเพราะ “ไม่แน่ใจ” หากข้อมูลมีอยู่แล้ว
-""".strip(),
-    PRACTICAL: """
-คุณคือผู้ช่วย AI บุคลิก "Practical"
-
-ลักษณะนิสัย:
-- ตอบสั้น กระชับ ใช้งานได้จริง
-- โฟกัส action / checklist / step
-- ข้ามทฤษฎีที่ไม่จำเป็น
-- เปิดให้ผู้ใช้ถามต่อเพื่อขยาย
-
-แนวทาง:
-- bullet / step สั้น ๆ
-- ตรงประเด็น
-- ความเร็วและการใช้งานจริงมาก่อน
-
-ข้อกำหนดสำคัญ:
-- หากเอกสารมีข้อมูล ให้สรุปและตอบทันที
-- ห้ามอ้างว่า “ไม่มีข้อมูล” หากเอกสารเกี่ยวข้องโดยตรง
-""".strip(),
-}
-
-
+# -------------------------------------------------------------------
+# Switch UX strings (still config, not prompts)
+# -------------------------------------------------------------------
 PERSONA_SWITCH_CONFIRMATION_PROMPTS: Dict[str, str] = {
     ACADEMIC: "ต้องการเปลี่ยนเป็นโหมด Academic จริง ๆ ใช่ไหม?",
     PRACTICAL: "ต้องการเปลี่ยนเป็นโหมด Practical จริง ๆ ใช่ไหม?",
@@ -90,7 +66,14 @@ PERSONA_SWITCH_SUCCESS_MESSAGES: Dict[str, str] = {
 }
 
 
+# -------------------------------------------------------------------
+# Normalization
+# -------------------------------------------------------------------
 def normalize_persona_id(persona_id: Optional[str]) -> str:
+    """
+    Normalize persona id into {academic, practical}.
+    Keep aliases here ONLY for id mapping (no behavior text).
+    """
     if not persona_id:
         return DEFAULT_PERSONA
 
@@ -100,9 +83,18 @@ def normalize_persona_id(persona_id: Optional[str]) -> str:
         return pid
 
     alias_map = {
+        "acad": ACADEMIC,
+        "prac": PRACTICAL,
         "expert": ACADEMIC,
         "balanced": PRACTICAL,
         "minimal": PRACTICAL,
+        "วิชาการ": ACADEMIC,
+        "เชิงลึก": ACADEMIC,
+        "ละเอียด": ACADEMIC,
+        "ทางการ": ACADEMIC,
+        "สั้น": PRACTICAL,
+        "กระชับ": PRACTICAL,
+        "เร็ว": PRACTICAL,
         "โหมดละเอียด": ACADEMIC,
         "โหมดสั้น": PRACTICAL,
     }
@@ -110,14 +102,18 @@ def normalize_persona_id(persona_id: Optional[str]) -> str:
     return alias_map.get(pid, DEFAULT_PERSONA)
 
 
-def build_strict_profile(
-    persona_id: str,
-    current: Optional[Dict] = None
-) -> Dict:
-    persona_id = normalize_persona_id(persona_id)
-    base = PERSONA_PROFILES.get(persona_id, {})
+# -------------------------------------------------------------------
+# Strict profile builder
+# -------------------------------------------------------------------
+def build_strict_profile(persona_id: str, current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Merge persona baseline policy into current strict_profile (if any).
+    Baseline always wins for keys it defines.
+    """
+    pid = normalize_persona_id(persona_id)
+    base = PERSONA_PROFILES.get(pid, {})
 
-    merged: Dict = {}
+    merged: Dict[str, Any] = {}
     if isinstance(current, dict):
         merged.update(deepcopy(current))
 
@@ -127,14 +123,12 @@ def build_strict_profile(
     return merged
 
 
-def get_persona_system_prompt(persona_id: str) -> str:
-    pid = normalize_persona_id(persona_id)
-    return PERSONA_SYSTEM_PROMPTS.get(pid, PERSONA_SYSTEM_PROMPTS[DEFAULT_PERSONA])
-
-
+# -------------------------------------------------------------------
+# Switch UX helpers
+# -------------------------------------------------------------------
 def get_switch_confirmation_prompt(persona_id: str) -> str:
     pid = normalize_persona_id(persona_id)
-    return PERSONA_SWITCH_CONFIRMATION_PROMPTS.get(pid)
+    return PERSONA_SWITCH_CONFIRMATION_PROMPTS.get(pid, "")
 
 
 def get_switch_success_message(persona_id: str) -> str:
@@ -142,13 +136,20 @@ def get_switch_success_message(persona_id: str) -> str:
     return PERSONA_SWITCH_SUCCESS_MESSAGES.get(pid, "")
 
 
-def apply_persona_profile(context: Dict, strict_profile: Dict) -> Dict:
+# -------------------------------------------------------------------
+# Apply into state.context (supervisor owns when to call this)
+# -------------------------------------------------------------------
+def apply_persona_profile(context: Dict[str, Any], strict_profile: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Store effective persona policy into context in a structured way.
+    This should be the only "write" this module does.
+    """
     if not isinstance(context, dict):
         return {}
 
     ctx = deepcopy(context)
     ctx["persona_profile"] = {
-        "effective": strict_profile,
+        "effective": deepcopy(strict_profile) if isinstance(strict_profile, dict) else {},
         "persona_id": ctx.get("persona_id"),
     }
     return ctx

@@ -14,13 +14,32 @@ from typing import Callable, Dict, List, Optional, Tuple
 class PracticalPolicyConfig:
     # Hard bans (content-level) — applies to NON-QUOTE lines only (see quote rules below)
     forbidden_phrases: Tuple[str, ...] = (
+        # อ้อม/ขออนุญาต
         "เพื่อความถูกต้อง",
         "ขออนุญาต",
         "รบกวน",
         "ขอข้อมูลเพิ่ม",
         "ช่วยระบุให้ชัดเจน",
         "ต้องการเปลี่ยนเป็น",
-        # เพิ่มได้ตามจริง
+
+        # system/meta talk ที่ practical ไม่ควรหลุด
+        "จากเอกสาร",          # practical ไม่ควรขึ้นต้น/เล่าเมตา (ยังยก quote ได้)
+        "จากข้อมูลในเอกสาร",
+        "ในระบบของฉัน",
+        "ในระบบของเรา",
+        "ระบบของฉัน",
+        "ระบบของเรา",
+        "ฉันจะ",
+        "ผมจะ",
+        "ดิฉันจะ",
+        "ขออธิบายว่า",
+        "โมเดล",
+        "LLM",
+        "retrieve",
+        "retriever",
+        "vector",
+        "chroma",
+        "embedding",
     )
 
     # “อ้อม/เมตา” patterns (behavior-level) — applies to NON-QUOTE lines only
@@ -31,6 +50,11 @@ class PracticalPolicyConfig:
         re.compile(r"^\s*ขออนุญาต", re.IGNORECASE),
         re.compile(r"^\s*รบกวน", re.IGNORECASE),
         re.compile(r"^\s*ขอข้อมูลเพิ่ม", re.IGNORECASE),
+
+        # system/meta talk preface
+        re.compile(r"^\s*(จากเอกสาร|จากข้อมูลในเอกสาร)\b", re.IGNORECASE),
+        re.compile(r"^\s*(ในระบบของฉัน|ในระบบของเรา|ระบบของฉัน|ระบบของเรา)\b", re.IGNORECASE),
+        re.compile(r"^\s*(ฉันจะ|ผมจะ|ดิฉันจะ)\b", re.IGNORECASE),
     ))
 
     # Structural constraints (still counts ALL lines including quotes by default)
@@ -50,8 +74,8 @@ class PracticalPolicyConfig:
     # - "trim": aggressively trim content
     fallback_mode: str = "minimal_question"
 
-    # Minimal safe question if we must fallback
-    fallback_question: str = "ขอทราบรายละเอียดเพิ่ม 1 ข้อ: ร้านมีพื้นที่เกิน 200 ตร.ม. ไหม?"
+    # Minimal safe question if we must fallback (domain-safe + single question)
+    fallback_question: str = "ต้องการทำเรื่องอะไรเป็นหลักครับ (เช่น ใบอนุญาต/ภาษี/VAT/ประกันสังคม)?"
 
     # Should we enforce Thai-only? (optional, weak heuristic)
     enforce_thai_only: bool = False
@@ -66,14 +90,12 @@ DEFAULT_POLICY = PracticalPolicyConfig()
 
 
 # ============================================================
-# Quote helpers (NEW)
+# Quote helpers
 # ============================================================
 
 def _is_quote_line(line: str) -> bool:
     """
     Treat lines starting with '>' (after trimming left spaces) as verbatim quotes.
-    Example:
-      > รบกวนยื่นสำเนาทะเบียนบ้าน...
     """
     return (line or "").lstrip().startswith(">")
 
@@ -106,22 +128,80 @@ def _count_bullets(lines: List[str]) -> int:
     return sum(1 for ln in lines if ln.startswith(("-", "•", "*")))
 
 
+# ---- Multi-question heuristics (NEW) ----
+_Q_ENDING_RE = re.compile(r"(ไหม|หรือไม่|หรือเปล่า)\s*$", re.IGNORECASE)
+_Q_MARK_RE = re.compile(r"\?", re.IGNORECASE)
+_Q_PREFIX_RE = re.compile(r"^\s*(ถาม|คำถาม)\s*[:：]", re.IGNORECASE)
+_Q_NUM_LINE_RE = re.compile(r"^\s*\d+\)\s+.*\?$", re.IGNORECASE)
+
+# A) Question line that contains conjunctions tends to mean "A and B?" => multi-question risk
+# We treat it as 2 questions (counts as +2 instead of +1)
+_MULTI_Q_CONJ_RE = re.compile(
+    r"(?:\bและ\b|\bหรือ\b|พร้อมกับ|รวมถึง|ตลอดจน|กับ)\s+.+",  # has conjunction + another clause
+    re.IGNORECASE,
+)
+
+# B) Explicit "ช่วยบอก A และ B ไหม" / "บอก A กับ B ได้ไหม" patterns
+_MULTI_Q_HELP_RE = re.compile(
+    r"(ช่วย|รบกวน|บอก|แจ้ง|ยืนยัน|ระบุ).*(และ|หรือ|พร้อมกับ|รวมถึง|กับ).*(ไหม|ได้ไหม|หรือไม่|หรือเปล่า|\?)",
+    re.IGNORECASE,
+)
+
+
+def _is_questionish_line(ln: str) -> bool:
+    s = (ln or "").strip()
+    if not s:
+        return False
+    if _Q_MARK_RE.search(s):
+        return True
+    if _Q_ENDING_RE.search(s):
+        return True
+    if _Q_PREFIX_RE.search(s):
+        return True
+    return False
+
+
 def _count_questions(text: str) -> int:
     """
-    Heuristic question counter for Thai:
+    Heuristic question counter for Thai.
+
+    Base signals:
     - count '?'
     - count line endings with "ไหม/หรือไม่/หรือเปล่า"
     - count explicit question markers like "ถาม:"
+    - count numbered question lines like "1) ...?"
+
+    NEW:
+    - If a question line contains conjunctions that imply multiple asks (และ/หรือ/พร้อมกับ/รวมถึง/กับ),
+      treat it as multi-question by adding an extra count (+1).
+    - If matches stronger help-pattern ("ช่วยบอก A และ B ไหม"), count as 2.
     """
     t = (text or "")
-    q = t.count("?")
+    lines = _split_lines(t)
 
-    endings = re.findall(r"(ไหม|หรือไม่|หรือเปล่า)\s*$", t, flags=re.MULTILINE)
-    q += len(endings)
+    q = 0
 
-    q += len(re.findall(r"^\s*(ถาม|คำถาม)\s*[:：]", t, flags=re.MULTILINE))
+    # Base counting at line-level (more stable than raw '?' count)
+    for ln in lines:
+        if not _is_questionish_line(ln):
+            continue
+
+        # Strong multi-question pattern => count as 2
+        if _MULTI_Q_HELP_RE.search(ln):
+            q += 2
+            continue
+
+        # If contains '?' or ending markers => at least 1
+        q += 1
+
+        # Conjunction inside a question line => likely multiple asks
+        # Example: "ช่วยบอก A และ B ไหม" / "ต้องทำ A หรือ B ไหม"
+        if _MULTI_Q_CONJ_RE.search(ln) and (("?" in ln) or bool(_Q_ENDING_RE.search(ln))):
+            q += 1
+
+    # Extra explicit patterns (keep for backward compatibility)
     q += len(re.findall(r"^\s*\d+\)\s+.*\?$", t, flags=re.MULTILINE))
-
+    # Avoid double-counting if the above already counted; but this is OK because it triggers strictness.
     return q
 
 
@@ -287,10 +367,11 @@ def build_rewrite_prompt(text: str, cfg: PracticalPolicyConfig) -> str:
 
 กติกา (ต้องทำตามทั้งหมด):
 - ภาษาไทย 100%
-- สุภาพแบบตรง ไม่อ้อม ไม่เกริ่นเหตุผลก่อนถาม
+- สุภาพแบบตรง ไม่อ้อม ไม่เล่าระบบ/กระบวนการของตัวเอง
 - ห้ามมีคำ/วลีต่อไปนี้ (ยกเว้นอยู่ในบรรทัด quote ที่ขึ้นต้นด้วย ">"): {banned}
-- ห้ามขออนุญาต/รบกวน/อธิบายเหตุผลก่อนถาม (ยกเว้นอยู่ในบรรทัด quote)
-- ถ้าต้องถาม ให้มี “คำถามเดียว” สั้น ๆ เท่านั้น และไม่มีเหตุผลประกอบ
+- ห้ามเกริ่นนำเชิงเมตา เช่น “จากเอกสาร.../ในระบบ.../ฉันจะ...” (ยกเว้นอยู่ในบรรทัด quote)
+- ถ้าต้องถาม ให้มี “คำถามเดียว” สั้น ๆ เท่านั้น
+- ห้ามทำคำถามซ้อนด้วย “และ/หรือ/พร้อมกับ/รวมถึง/กับ” ในประโยคคำถามเดียว
 - ความยาว: ไม่เกิน {cfg.max_lines} บรรทัด หรือ {cfg.max_bullets} bullet
 - คงสาระเดิมให้มากที่สุด แต่ทำให้กระชับและ actionable
 - คืนค่าเป็น “ข้อความล้วน” เท่านั้น (ไม่ใช่ JSON, ไม่ใช่ markdown)
@@ -327,7 +408,7 @@ def enforce_practical_policy(
 
     Quote rule:
     - If cfg.allow_forbidden_inside_quotes=True, quote lines starting with ">" are excluded from
-      forbidden phrase/preface/multi-question checks.
+      forbidden phrase/preface/multi-question/english checks.
     """
     original = _normalize(text)
     meta: Dict[str, object] = {

@@ -24,3 +24,5 @@ sentence-transformers>=3.0.1
 # --- Utilities ---
 requests>=2.31.0
 tqdm>=4.66.0
+
+gradio>=4.0.0

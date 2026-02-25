@@ -1,3 +1,4 @@
+#/Users/w.worawan/Downloads/ai-operation-microservice3_v2ori/run.sh
 #!/bin/bash
 export $(grep -v '^#' env.properties | xargs)
 
