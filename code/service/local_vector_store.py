@@ -1,14 +1,38 @@
 # code/service/local_vector_store.py
 from __future__ import annotations
 
-from typing import List, Dict, Optional
+import shutil
 from pathlib import Path
+from typing import List, Dict, Optional
 
 from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
 import conf
+
+
+# Safe directories for rmtree — prevents accidental deletion outside project scope
+_SAFE_RMTREE_PARENTS = [
+    str(Path.cwd()),
+    str(Path.home() / ".cache"),
+    str(Path.home() / "Downloads"),
+]
+
+
+def _safe_rmtree(path: Path) -> None:
+    """
+    Safety-wrapped shutil.rmtree.
+    Validates that path is inside a known-safe parent directory before deleting.
+    Raises RuntimeError if path is outside safe dirs instead of silently deleting.
+    """
+    resolved = str(path.resolve())
+    if not any(resolved.startswith(safe) for safe in _SAFE_RMTREE_PARENTS):
+        raise RuntimeError(
+            f"[VectorStore] Refusing to delete '{resolved}' — path is outside safe directories. "
+            f"Check LOCAL_VECTOR_DIR in env.properties."
+        )
+    shutil.rmtree(path)  # raise on error (no ignore_errors)
 
 
 def _stringify_metadata(metadata: dict) -> dict:
@@ -23,9 +47,7 @@ class LocalVectorStoreManager:
     Local-only VectorStore manager using Chroma
 
     NOTE (production boundary):
-    - This layer is infra only: it should NOT implement policy (reuse/new-topic).
-      Policy belongs to PersonaSupervisor / persona services.
-    - This layer can provide "raw docs" retrieval for academic quality if needed.
+    - infra only; no policy
     """
 
     def __init__(self):
@@ -49,6 +71,9 @@ class LocalVectorStoreManager:
         base.mkdir(parents=True, exist_ok=True)
         return str(base)
 
+    def _collection_name(self) -> str:
+        return str(getattr(conf, "COLLECTION_NAME", "default_collection"))
+
     def _collection_count(self) -> Optional[int]:
         if not self.vectorstore:
             return None
@@ -67,42 +92,68 @@ class LocalVectorStoreManager:
         print("[VectorStore] Connecting to local Chroma...")
         self.initialize_embeddings()
 
+        persist_dir = self._persist_dir()
+        collection_name = self._collection_name()
+
+        print(f"[VectorStore] persist_directory = {Path(persist_dir).resolve()}")
+        print(f"[VectorStore] collection_name   = {collection_name}")
+
         self.vectorstore = Chroma(
-            collection_name=conf.COLLECTION_NAME,
+            collection_name=collection_name,
             embedding_function=self.embedding_model,
-            persist_directory=self._persist_dir(),
+            persist_directory=persist_dir,
         )
 
         count = self._collection_count()
-        print(f"[VectorStore] Connected (collection={conf.COLLECTION_NAME})")
+        print(f"[VectorStore] Connected (collection={collection_name})")
         print(f"[VectorStore] Collection count = {count}")
 
         if fail_if_empty and (count is None or count == 0):
             raise RuntimeError(
                 "Local Chroma collection is empty. You must ingest documents first.\n"
-                "Fix: run `python scripts/ingest_local.py` (or call ingest_documents())."
+                "Fix: run `PYTHONPATH=\"$PWD\" python -m code.scripts.ingest_local`"
             )
 
         return self._build_retriever()
 
-    def create_vectorstore(self, documents: List[Document]):
+    def create_vectorstore(self, documents: List[Document], reset: bool = True):
+        """
+        Build a fresh local Chroma vectorstore from documents.
+
+        reset=True:
+          - delete persist_directory to avoid duplicate/old vectors
+          - guarantees stable count after ingest
+        """
         self.initialize_embeddings()
+
+        persist_dir = self._persist_dir()
+        collection_name = self._collection_name()
+
+        if reset:
+            # IMPORTANT: wipe the actual persist directory used by the app
+            p = Path(persist_dir)
+            if p.exists():
+                print(f"[VectorStore] Reset enabled -> removing persist dir: {p.resolve()}")
+                _safe_rmtree(p)
+            p.mkdir(parents=True, exist_ok=True)
 
         docs = [
             Document(
                 page_content=d.page_content,
                 metadata=_stringify_metadata(getattr(d, "metadata", {}) or {}),
             )
-            for d in documents
+            for d in (documents or [])
         ]
 
         print(f"[VectorStore] Creating local Chroma ({len(docs)} docs)...")
+        print(f"[VectorStore] persist_directory = {Path(persist_dir).resolve()}")
+        print(f"[VectorStore] collection_name   = {collection_name}")
 
         self.vectorstore = Chroma.from_documents(
             documents=docs,
             embedding=self.embedding_model,
-            collection_name=conf.COLLECTION_NAME,
-            persist_directory=self._persist_dir(),
+            collection_name=collection_name,
+            persist_directory=persist_dir,
         )
 
         try:
@@ -119,19 +170,12 @@ class LocalVectorStoreManager:
     # Retrieval helpers (infra-only)
     # ------------------------------------------------------------------
     def retrieve_raw_docs(self, query: str, k: Optional[int] = None) -> List[Document]:
-        """
-        Return LangChain Document objects (full page_content; metadata as-is).
-        Useful for academic final answer or downstream post-processing.
-
-        NOTE: No clipping here. Consumers decide how much to include.
-        """
         if not query or not str(query).strip():
             return []
         if not self.retriever:
             raise RuntimeError("Retriever not initialized yet.")
 
         if k and int(k) > 0 and self.vectorstore is not None:
-            # build a one-off retriever with different k (no policy)
             tmp = self.vectorstore.as_retriever(search_kwargs={"k": int(k)})
             docs = tmp.invoke(query)
         else:
@@ -140,10 +184,6 @@ class LocalVectorStoreManager:
         return list(docs or [])
 
     def retrieve_docs(self, query: str, k: Optional[int] = None, clip_chars: int = 600) -> List[Dict]:
-        """
-        Backward-compatible helper: returns list[dict] with clipped content.
-        Still infra-only. No policy (reuse/new-topic) is applied here.
-        """
         docs = self.retrieve_raw_docs(query, k=k)
         out: List[Dict] = []
         for doc in docs:
@@ -160,10 +200,6 @@ _MANAGER = LocalVectorStoreManager()
 
 
 def get_retriever(k: int = 0, fail_if_empty: bool = True):
-    """
-    Public API for local usage.
-    Returns a LangChain retriever (infra only).
-    """
     if _MANAGER.retriever is not None:
         if k and int(k) > 0 and _MANAGER.vectorstore is not None:
             _MANAGER._build_retriever(k=int(k))
@@ -178,10 +214,6 @@ def get_retriever(k: int = 0, fail_if_empty: bool = True):
 
 
 def retrieve_raw_docs(query: str, k: int = 0, fail_if_empty: bool = True) -> List[Document]:
-    """
-    Convenience function (optional): retrieve full Documents without clipping.
-    Keeps infra/policy separation: caller decides *when* to call this.
-    """
     if _MANAGER.retriever is None:
         _MANAGER.connect_to_existing(fail_if_empty=fail_if_empty)
     kk = int(k) if k and int(k) > 0 else None
@@ -189,15 +221,12 @@ def retrieve_raw_docs(query: str, k: int = 0, fail_if_empty: bool = True) -> Lis
 
 
 def retrieve_docs(query: str, k: int = 0, clip_chars: int = 600, fail_if_empty: bool = True) -> List[Dict]:
-    """
-    Convenience function: retrieve dict docs with clipping.
-    """
     if _MANAGER.retriever is None:
         _MANAGER.connect_to_existing(fail_if_empty=fail_if_empty)
     kk = int(k) if k and int(k) > 0 else None
     return _MANAGER.retrieve_docs(query, k=kk, clip_chars=clip_chars)
 
 
-def ingest_documents(documents: List[Document]):
+def ingest_documents(documents: List[Document], reset: bool = True):
     """Public API for ingestion."""
-    return _MANAGER.create_vectorstore(documents)
+    return _MANAGER.create_vectorstore(documents, reset=reset)

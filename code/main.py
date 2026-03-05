@@ -8,8 +8,10 @@ Enterprise CLI baseline:
 - Provides 'reset' to wipe current session state (avoid stale state confusion)
 """
 
+import re
 import uuid
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.prompt import Prompt
 
 from model.state_manager import StateManager
@@ -18,6 +20,25 @@ from model.persona_supervisor import PersonaSupervisor
 from service.local_vector_store import get_retriever
 
 console = Console()
+
+_BARE_URL_RE = re.compile(r'(?<![(\[])https?://\S+')
+
+def _format_reply(text: str) -> str:
+    """
+    Prepare bot reply for Rich console.print():
+    1. Escape all Rich markup characters in the text
+    2. Convert bare URLs to Rich OSC-8 hyperlinks [link=URL]URL[/link]
+    Result: compact display (no Markdown blank-line spacing) + clickable URLs.
+    """
+    if not text:
+        return text
+    escaped = rich_escape(text)
+    def _replace(m: re.Match) -> str:
+        url = m.group(0).rstrip(".,;:)\"'")
+        # After rich_escape, brackets are escaped — match on original URL text
+        escaped_url = rich_escape(url)
+        return f"[link={url}]{escaped_url}[/link]"
+    return _BARE_URL_RE.sub(_replace, escaped)
 
 
 def create_initial_state(session_id: str) -> ConversationState:
@@ -73,7 +94,9 @@ def main():
     state_manager.save(session_id, state)
 
     if greet:
-        console.print(f"\n[bold magenta]Assistant[/bold magenta]: {greet}\n")
+        console.print(f"\n[bold magenta]Assistant[/bold magenta]:")
+        console.print(_format_reply(greet))
+        console.print("")
     console.print(_debug_line(state))
     console.print("[green]System ready. Type 'exit' to quit. Type 'reset' to restart this session.[/green]\n")
 
@@ -94,7 +117,9 @@ def main():
                 state, greet = supervisor.handle(state=state, user_input="")
                 state_manager.save(session_id, state)
                 if greet:
-                    console.print(f"\n[bold magenta]Assistant[/bold magenta]: {greet}\n")
+                    console.print(f"\n[bold magenta]Assistant[/bold magenta]:")
+                    console.print(_format_reply(greet))
+                    console.print("")
                 console.print(_debug_line(state))
                 console.print("")
                 continue
@@ -102,7 +127,9 @@ def main():
             state, reply = supervisor.handle(state=state, user_input=user_input)
             state_manager.save(session_id, state)
 
-            console.print(f"\n[bold magenta]Assistant[/bold magenta]: {reply}\n")
+            console.print(f"\n[bold magenta]Assistant[/bold magenta]:")
+            console.print(_format_reply(reply))
+            console.print("")
             console.print(_debug_line(state))
             console.print("")
 

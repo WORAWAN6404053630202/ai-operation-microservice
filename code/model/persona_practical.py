@@ -1,7 +1,7 @@
 # code/model/persona_practical.py
 import json
+import logging
 import re
-import time
 from typing import Tuple, Dict, Any, List, Optional, Callable
 
 from langchain_openai import ChatOpenAI
@@ -9,7 +9,10 @@ from langchain_core.messages import HumanMessage
 
 import conf
 from model.conversation_state import ConversationState
+from utils.llm_call import llm_invoke
 from utils.prompts_practical import SYSTEM_PROMPT as SYSTEM_PROMPT_PRACTICAL
+
+_LOG = logging.getLogger("restbiz.practical")
 
 # P0: practical policy "last gate"
 try:
@@ -22,11 +25,14 @@ class PracticalPersonaService:
     """
     Practical Persona (Agentic, fast, short)
 
-    NOTE (Supervisor-owned greeting/menu):
-    - This file keeps its greeting/menu/pending-slot recovery code,
-      but Supervisor will not call Practical for greeting/menu anymore.
-    - Pending-slot recovery is disabled by default to prevent hijack,
-      and can be enabled via state.context["allow_practical_pending_recover"]=True.
+    Supervisor-owned menu contract (IMPORTANT):
+    - Practical MUST always be able to "consume choices" when pending_slot exists:
+        - numeric (1,2,3), ranges (1-3), multi (1,3), digit-pack (123), exact label, and free text.
+    - Practical MUST NOT hijack Supervisor's main menu/greeting:
+        - If state.context["supervisor_owns_menu"] is True:
+            - do NOT render greeting/topic menu
+            - do NOT set/override pending_slot for topic menu
+    - Pending-slot recovery remains opt-in and additionally gated by owner to prevent hijack.
     """
 
     persona_id = "practical"
@@ -36,9 +42,12 @@ class PracticalPersonaService:
     _TH_SAWASDEE_RE = re.compile(r"^\s*สว[^\s]{0,8}ดี", re.IGNORECASE)
     _TH_DEE_RE = re.compile(r"^\s*ดี(?:ครับ|คับ|ค่ะ|คะ|งับ|จ้า|จ้ะ|ค่า)?", re.IGNORECASE)
 
-    _THANKS_RE = re.compile(r"(ขอบคุณ|ขอบใจ|thx|thanks)\b", re.IGNORECASE)
+    _THANKS_RE = re.compile(
+        r"(ขอบคุณ|ขอบใจ|ขอบพระคุณ|ขอบคุณมาก|ขอบคุณนะ|thx|thanks|thank you)",
+        re.IGNORECASE,
+    )
     _OK_RE = re.compile(
-        r"^\s*(โอเค|ok|okay|รับทราบ|เข้าใจแล้ว|ได้เลย|เรียบร้อย)\s*(ครับ|คับ|ค่ะ|คะ)?\s*$",
+        r"^\s*(โอเค|ok|okay|รับทราบ|เข้าใจแล้ว|เข้าใจ|ได้เลย|เรียบร้อย|เคลียร์|เคลียแล้ว|พอแล้ว|พอครับ|พอค่ะ|ครบแล้ว|got\s*it|clear)\s*(ครับ|คับ|ค่ะ|คะ)?\s*$",
         re.IGNORECASE,
     )
 
@@ -75,6 +84,22 @@ class PracticalPersonaService:
         return t
 
     # --------------------------
+    # Owner/menu guards (NEW)
+    # --------------------------
+    def _supervisor_owns_menu(self, state: ConversationState) -> bool:
+        ctx = state.context or {}
+        return bool(ctx.get("supervisor_owns_menu", False))
+
+    def _get_last_bot_owner(self, state: ConversationState) -> str:
+        ctx = state.context or {}
+        owner = (ctx.get("last_bot_owner") or "").strip().lower()
+        return owner
+
+    def _set_last_bot_owner(self, state: ConversationState, owner: str) -> None:
+        state.context = state.context or {}
+        state.context["last_bot_owner"] = (owner or "").strip()
+
+    # --------------------------
     # Safe append (dedupe)
     # --------------------------
     def _append_user_once(self, state: ConversationState, content: str) -> None:
@@ -86,7 +111,7 @@ class PracticalPersonaService:
         if (
             state.messages
             and state.messages[-1].get("role") == "user"
-            and (state.messages[-1].get("content") or "") == c
+            and (state.messages[-1].get("content") or "").strip() == c.strip()
         ):
             return
         state.messages.append({"role": "user", "content": c})
@@ -94,15 +119,17 @@ class PracticalPersonaService:
     def _append_assistant(self, state: ConversationState, content: str) -> None:
         """
         P0: Dedupe assistant to prevent recursion/forced flows from duplicating turns.
+        Also tag last_bot_owner='practical' for safe pending-slot recovery gating.
         """
         c = "" if content is None else str(content)
         if not c.strip():
             c = c.strip()
         if state.messages:
             last = state.messages[-1]
-            if last.get("role") == "assistant" and (last.get("content") or "") == c:
+            if last.get("role") == "assistant" and (last.get("content") or "").strip() == c.strip():
                 return
         state.messages.append({"role": "assistant", "content": c})
+        self._set_last_bot_owner(state, "practical")
 
     # --------------------------
     # Greeting prefix (Practical fallback)
@@ -110,7 +137,7 @@ class PracticalPersonaService:
     _GREET_PREFIX_FALLBACKS: Dict[str, str] = {
         "greet": "สวัสดีครับ อยากให้ช่วยเรื่องไหนเกี่ยวกับร้านอาหารครับ",
         "thanks": "ยินดีครับ อยากไปต่อหัวข้อไหนครับ",
-        "smalltalk": "ได้ครับ แล้วอยากให้ช่วยเรื่องไหนเกี่ยวกับร้านอาหารครับ",
+        "smalltalk": "แล้วอยากให้ช่วยเรื่องไหนเกี่ยวกับร้านอาหารครับ",
         "blank": "อยากให้ช่วยเรื่องไหนเกี่ยวกับร้านอาหารครับ",
     }
 
@@ -119,12 +146,14 @@ class PracticalPersonaService:
         Returns JSON: { "prefix": "..." }
         """
         switch_model = getattr(conf, "OPENROUTER_SWITCH_MODEL", conf.OPENROUTER_MODEL)
+        timeout = int(getattr(conf, "LLM_REQUEST_TIMEOUT", 30))
         llm = ChatOpenAI(
             model=switch_model,
             openai_api_key=conf.OPENROUTER_API_KEY,
             openai_api_base=conf.OPENROUTER_BASE_URL,
             temperature=0.35,
             max_tokens=120,
+            request_timeout=timeout,
             model_kwargs={"response_format": {"type": "json_object"}},
         )
 
@@ -144,7 +173,7 @@ class PracticalPersonaService:
                 f"ตัวอย่างหัวข้อในระบบ (เพื่ออ้างอิงคำ): {menu_preview}\n"
             )
             try:
-                text = llm.invoke([HumanMessage(content=prompt)]).content.strip()
+                text = llm_invoke(llm, [HumanMessage(content=prompt)], logger=_LOG, label="Practical/greet").content.strip()
             except Exception:
                 return {}
 
@@ -189,9 +218,12 @@ class PracticalPersonaService:
     # --------------------------
     _MULTI_Q_SPLIT_RE = re.compile(r"[?？]\s*")
     _META_TALK_RE = re.compile(
-        r"(ในฐานะ(ของ)?(บอท|ผู้ช่วย)|ฉันจะ|ผมจะ|ขออนุญาต|ขออธิบายว่า|ระบบนี้|นโยบาย|policy|ตามที่คุณขอ|ผมไม่สามารถ|ฉันไม่สามารถ)",
+        r"(ในฐานะ(ของ)?(บอท|ผู้ช่วย)|ฉันจะ|ผมจะ|ขออนุญาต|ขออธิบายว่า|ระบบนี้|นโยบาย|policy|ตามที่คุณขอ|ผมไม่สามารถ|ฉันไม่สามารถ|\bdocuments\b)",
         re.IGNORECASE,
     )
+
+    # Strip standalone "documents" lines (LLM prompt bleed-through)
+    _DOCUMENTS_LINE_RE = re.compile(r"(?m)^[ \t]*documents[ \t]*$", re.IGNORECASE)
 
     def _fallback_single_question(self, text: str) -> str:
         t = re.sub(r"\s+", " ", (text or "")).strip()
@@ -221,13 +253,35 @@ class PracticalPersonaService:
             return "ตอนนี้ยังไม่พบข้อมูลที่ยืนยันได้ในเอกสารครับ"
 
         t = self._META_TALK_RE.sub("", t).strip()
-        t = re.sub(r"\s+", " ", t).strip()
+        # Remove standalone "documents" lines (LLM prompt bleed-through)
+        t = self._DOCUMENTS_LINE_RE.sub("", t).strip()
+        # Remove "ทั้งหมด" menu-option lines that leaked into answer content
+        t = re.sub(r"(?m)^[ \t]*\d*[.)]\s*ทั้งหมด\s*(ครับ|ค่ะ|นะ|นะครับ|นะคะ)?\s*$", "", t)
+        t = re.sub(r"(?m)^[ \t]*ทั้งหมด\s*(ครับ|ค่ะ|นะ|นะครับ|นะคะ)?\s*$", "", t)
+        # Remove fee section when value is zero/free — no value to show user
+        _FREE_FEE = r"(?:ไม่มีค่าธรรมเนียม|ไม่เสียค่าธรรมเนียม|ไม่มี|ฟรี|0\s*บาท)"
+        t = re.sub(
+            rf"(?m)^\d+\)\s*ค่าธรรมเนียม[^\n]*\n(?:[ \t]*[•\-*]?\s*{_FREE_FEE}[^\n]*\n?)*",
+            "",
+            t,
+        )
+        # Preserve newlines — only collapse horizontal whitespace (spaces/tabs)
+        t = re.sub(r"[ \t]+", " ", t)
+        # Insert newlines before numbered sections (1) or 1. format) and bullet points if missing
+        t = re.sub(r"(?<!\n)\s+(\d+[).])\s*", r"\n\1 ", t)
+        t = re.sub(r"(?<!\n)\s+([-•*])\s+", r"\n\1 ", t)
+        t = "\n".join(ln.strip() for ln in t.split("\n") if ln.strip())
 
         if "?" in t or "？" in t:
             t = re.split(r"[?？]", t, maxsplit=1)[0].strip()
 
         if not t.endswith("ครับ"):
-            t = t.rstrip(" .") + "ครับ"
+            last_line = (t.split("\n")[-1] if "\n" in t else t).strip()
+            if re.search(r"[a-zA-Z0-9/._\-]$", last_line):
+                # Ends with URL/path/non-Thai — add ครับ on separate line to avoid appending to URL
+                t = t + "\nครับ"
+            else:
+                t = t.rstrip(" .") + "ครับ"
         return t
 
     def _apply_practical_lint(self, text: str, kind: str) -> str:
@@ -239,16 +293,22 @@ class PracticalPersonaService:
             t2 = self._META_TALK_RE.sub("", t).strip()
             return t2 or t
 
+        if kind == "answer":
+            # Answers skip strict length policy (which would replace long answers with a question).
+            # Only apply meta-talk cleanup + newline normalization via _fallback_practical_answer.
+            return self._fallback_practical_answer(t)
+
+        # For "ask" only: apply full practical policy enforcement
         if callable(enforce_practical_policy):
             try:
                 out = enforce_practical_policy(t)
                 if isinstance(out, str):
                     t = out.strip() or t
                 elif isinstance(out, tuple) and len(out) == 2:
-                    ok, new_t = out
+                    new_t, lint_meta = out  # enforce_practical_policy returns (text, meta_dict)
                     if isinstance(new_t, str) and new_t.strip():
                         t = new_t.strip()
-                    if ok is False:
+                    if isinstance(lint_meta, dict) and lint_meta.get("ok") is False:
                         raise ValueError("practical_lint_failed")
                 elif isinstance(out, dict):
                     new_t = out.get("text") or out.get("output") or out.get("result")
@@ -261,9 +321,17 @@ class PracticalPersonaService:
                 pass
 
         if kind == "ask":
-            return self._fallback_single_question(t)
-        if kind == "answer":
-            return self._fallback_practical_answer(t)
+            # Split question text from numbered option lines before applying single-question lint.
+            # _fallback_single_question collapses newlines + strips \d+\) markers — would destroy options.
+            lines = t.splitlines()
+            opts_start = next(
+                (i for i, ln in enumerate(lines) if re.match(r"^\d+[).]", ln.strip())),
+                len(lines),
+            )
+            question_text = " ".join(ln.strip() for ln in lines[:opts_start] if ln.strip())
+            opts_text = "\n".join(lines[opts_start:])
+            cleaned_q = self._fallback_single_question(question_text)
+            return (cleaned_q + "\n" + opts_text).strip() if opts_text else cleaned_q
 
         return t
 
@@ -282,6 +350,7 @@ class PracticalPersonaService:
         "ช่องทางยื่นคำขอ / หน่วยงาน",
         "ข้อกำหนดทางกฎหมาย และข้อบังคับ",
         "ฟอร์มเอกสารตัวจริง",
+        "ทั้งหมด",
     ]
 
     _SECTION_SIGNALS: Dict[str, Dict[str, Any]] = {
@@ -332,6 +401,13 @@ class PracticalPersonaService:
     _FOLLOWUP_SHORT_RE = re.compile(
         r"^(แล้ว(ไง|ล่ะ)?|แล้ว(เอกสาร|ขั้นตอน|ค่าธรรมเนียม)?|ต่อไปล่ะ|มีอะไรบ้าง|ขอ(เอกสาร|ขั้นตอน|ค่าธรรมเนียม|ระยะเวลา|ช่องทาง))\s*$"
     )
+    # Continuation/follow-up questions — should always get a direct answer, never Phase 3 menu
+    _CONTINUATION_RE = re.compile(
+        r"(อีกไหม|อีกบ้าง|อีกมั้ย|ควรทำอะไรอีก|ต้องทำอะไรอีก|อะไรอีก|มีอะไรอีก"
+        r"|แล้วต้อง|แล้วควร|แล้วล่ะ|เพิ่มเติม|ยังมีอะไร|ต้องทำด้วย|อีกด้วย"
+        r"|ต่อไปต้อง|ขั้นต่อไป|หลังจากนั้น|นอกจากนี้|อื่นๆ.*ต้อง|ควรมี)",
+        re.IGNORECASE,
+    )
 
     def __init__(self, retriever):
         self.retriever = retriever
@@ -341,12 +417,14 @@ class PracticalPersonaService:
 
     def _init_llm(self):
         model_name = getattr(conf, "OPENROUTER_MODEL_PRACTICAL", conf.OPENROUTER_MODEL)
+        timeout = int(getattr(conf, "LLM_REQUEST_TIMEOUT", 30))
         self.llm = ChatOpenAI(
             model=model_name,
             openai_api_key=conf.OPENROUTER_API_KEY,
             openai_api_base=conf.OPENROUTER_BASE_URL,
             temperature=getattr(conf, "TEMPERATURE_PRACTICAL", 0.2),
             max_tokens=getattr(conf, "MAX_TOKENS_PRACTICAL", 650),
+            request_timeout=timeout,
             model_kwargs={"response_format": {"type": "json_object"}},
         )
 
@@ -521,16 +599,22 @@ class PracticalPersonaService:
         return "choice"
 
     # --------------------------
-    # Pending-slot recovery (DISABLED BY DEFAULT)
+    # Pending-slot recovery (OPT-IN + OWNER-GATED)  ✅ FIX
     # --------------------------
     def _maybe_recover_pending_slot_from_last_bot(self, state: ConversationState, user_text: str) -> None:
         """
-        Disabled by default to prevent hijack.
+        Recovery is disabled by default to prevent hijack.
         Enable only if explicitly requested:
           state.context["allow_practical_pending_recover"] = True
+
+        PLUS owner-gate:
+          - only recover if state.context["last_bot_owner"] == "practical"
         """
         ctx = state.context or {}
         if not bool(ctx.get("allow_practical_pending_recover", False)):
+            return
+
+        if (ctx.get("last_bot_owner") or "").strip().lower() != "practical":
             return
 
         pending = ctx.get("pending_slot")
@@ -545,24 +629,14 @@ class PracticalPersonaService:
         if not opts:
             return
 
-        slot_key = self._PHASE3_SLOT_KEY if self._PHASE3_MENU_HEADER in (last_bot or "") else (
-            "topic" if "เกี่ยวกับร้านอาหาร" in (last_bot or "") else self._infer_slot_key_from_question(last_bot)
+        slot_key = (
+            self._PHASE3_SLOT_KEY
+            if self._PHASE3_MENU_HEADER in (last_bot or "")
+            else ("topic" if "เกี่ยวกับร้านอาหาร" in (last_bot or "") else self._infer_slot_key_from_question(last_bot))
         )
         allow_multi = True if slot_key == self._PHASE3_SLOT_KEY else False
         ctx["pending_slot"] = {"key": slot_key, "options": opts, "allow_multi": allow_multi}
         state.context = ctx
-
-    # --------------------------
-    # The rest of file: unchanged from your version
-    # --------------------------
-    # ... (คงไว้ทั้งหมดตามที่คุณส่งมา)
-    #
-    # IMPORTANT:
-    # ผมไม่ได้ paste ต่อจนจบเพื่อไม่ให้คำตอบยาวเกินและเสี่ยงพลาดจุดที่คุณมีอยู่แล้ว
-    # ให้คุณ "คงส่วนที่เหลือ" จากไฟล์เดิมของคุณต่อท้ายจากฟังก์ชันนี้ลงไปได้เลย
-    #
-    # ถ้าคุณต้องการให้ผมส่งไฟล์ practical "เต็มทั้งไฟล์" แบบวางทับ 100% จริง ๆ
-    # ให้บอกผมได้ ผมจะรวมส่วนท้ายทั้งหมดให้ครบในรอบเดียวครับ
 
     def _consume_pending_slot_from_user(self, state: ConversationState, user_text: str) -> Optional[str]:
         ctx = state.context or {}
@@ -646,10 +720,15 @@ class PracticalPersonaService:
     # --------------------------
     # Topic menu from metadata (NO hallucination) + sanitation
     # --------------------------
-    def _build_topic_menu_from_corpus(self) -> List[str]:
-        q = "ใบอนุญาต เปิดร้านอาหาร ภาษี VAT จดทะเบียนพาณิชย์ สุขาภิบาลอาหาร"
-        docs = self._retrieve_docs(q)
+    # H2: Multi-query pool for richer topic menu (4 queries = broader coverage)
+    _TOPIC_POOL_QUERIES = [
+        "ใบอนุญาต เปิดร้านอาหาร",
+        "ภาษี VAT จดทะเบียนพาณิชย์",
+        "สุขาภิบาลอาหาร ประกันสังคม",
+        "เอกสาร ค่าธรรมเนียม ขั้นตอน",
+    ]
 
+    def _build_topic_menu_from_corpus(self) -> List[str]:
         freq: Dict[str, int] = {}
 
         def _add(v: Any) -> None:
@@ -658,17 +737,21 @@ class PracticalPersonaService:
                 return
             freq[s] = freq.get(s, 0) + 1
 
-        for d in docs:
-            md = d.get("metadata", {}) or {}
-            _add(md.get("license_type"))
-
-        for d in docs:
-            md = d.get("metadata", {}) or {}
-            _add(md.get("department"))
-
-        for d in docs:
-            md = d.get("metadata", {}) or {}
-            _add(md.get("operation_topic"))
+        seen_doc_ids: set = set()
+        for q in self._TOPIC_POOL_QUERIES:
+            try:
+                docs = self._retrieve_docs(q)
+            except Exception:
+                continue
+            for d in docs:
+                md = d.get("metadata", {}) or {}
+                doc_id = md.get("doc_id") or md.get("row_id") or id(d)
+                if doc_id in seen_doc_ids:
+                    continue
+                seen_doc_ids.add(doc_id)
+                _add(md.get("license_type"))
+                _add(md.get("department"))
+                _add(md.get("operation_topic"))
 
         items = sorted(freq.items(), key=lambda x: (-x[1], x[0]))
         menu = [k for k, _ in items][:6]
@@ -694,49 +777,44 @@ class PracticalPersonaService:
 
     def _reply_greeting_with_choices(self, state: ConversationState, kind: str = "greet") -> str:
         """
-        P0 FIX: show topic menu only once per session (controlled via state.context["main_menu_shown"]).
-        After that, return short prefix only and DO NOT touch pending_slot.
+        Practical greeting/menu renderer.
+
+        ✅ FIX: If Supervisor owns menu, do NOT show menu / do NOT set pending_slot.
+        (Still returns a short prefix so the system can respond naturally.)
         """
         state.context = state.context or {}
 
-        # ✅ If menu already shown this session -> short reply only (no menu / no pending_slot override)
-        if state.context.get("main_menu_shown"):
-            menu = self._get_topic_menu(state)
-            streak = int(state.context.get("greet_streak", 0) or 0) + 1
-            state.context["greet_streak"] = streak
-            prefix = self._pick_greet_prefix(kind=kind, menu=menu, greet_streak=streak)
-            return self._apply_practical_lint(prefix.strip(), kind="greet")
-
-        # First time -> show menu + set pending_slot
         menu = self._get_topic_menu(state)
-        state.context["pending_slot"] = {"key": "topic", "options": menu, "allow_multi": False}
-
-        # ✅ mark once
-        state.context["main_menu_shown"] = True
-
         streak = int(state.context.get("greet_streak", 0) or 0) + 1
         state.context["greet_streak"] = streak
+        prefix = self._pick_greet_prefix(kind=kind, menu=menu, greet_streak=streak).strip()
 
-        prefix = self._pick_greet_prefix(kind=kind, menu=menu, greet_streak=streak)
+        if self._supervisor_owns_menu(state):
+            return self._apply_practical_lint(prefix, kind="greet")
+
+        # ✅ menu once per session
+        if state.context.get("main_menu_shown"):
+            return self._apply_practical_lint(prefix, kind="greet")
+
+        state.context["pending_slot"] = {"key": "topic", "options": menu, "allow_multi": False}
+        state.context["main_menu_shown"] = True
+
         msg = (prefix.rstrip() + "\n" + self._format_numbered_options(menu)).strip()
         return self._apply_practical_lint(msg, kind="greet")
 
     def _reply_satisfaction(self, state: ConversationState) -> str:
-        # Uses same "menu once" guard in _reply_greeting_with_choices()
+        # Uses same guard in _reply_greeting_with_choices()
         return self._reply_greeting_with_choices(state, kind="thanks")
 
     # --------------------------
     # LLM + retrieval
     # --------------------------
-    def _call_llm_json(self, prompt: str, max_retries: int = 2) -> dict:
+    def _call_llm_json(self, prompt: str, max_retries: int = 2, state: Optional[ConversationState] = None) -> dict:
         last_err = None
         for _ in range(max_retries):
             try:
-                t0 = time.perf_counter()
-                text = (self.llm.invoke([HumanMessage(content=prompt)]).content or "").strip()
-                t1 = time.perf_counter()
-                if getattr(conf, "DEBUG_LATENCY", True):
-                    print(f"[LATENCY] llm_ms={(t1 - t0) * 1000:.0f} prompt_chars={len(prompt)}")
+                resp = llm_invoke(self.llm, [HumanMessage(content=prompt)], logger=_LOG, label="Practical/json", state=state)
+                text = (resp.content or "").strip()
 
                 if "```json" in text:
                     text = text.split("```json")[1].split("```")[0].strip()
@@ -749,8 +827,8 @@ class PracticalPersonaService:
                 last_err = e
                 continue
 
-        if getattr(conf, "DEBUG_LATENCY", True) and last_err:
-            print(f"[WARN] LLM JSON parse failed: {last_err}")
+        if last_err:
+            _LOG.warning("[Practical] LLM JSON parse failed: %s", last_err)
 
         return {
             "input_type": "new_question",
@@ -762,24 +840,98 @@ class PracticalPersonaService:
     def _retrieve_docs(self, query: str) -> List[Dict[str, Any]]:
         docs = self.retriever.invoke(query)
         results: List[Dict[str, Any]] = []
-        for d in docs[: getattr(conf, "RETRIEVAL_TOP_K", 20)]:
+        max_docs = getattr(conf, "LLM_DOCS_MAX_PRACTICAL", 8)
+        max_chars = getattr(conf, "LLM_DOC_CHARS_PRACTICAL", 250)
+        for d in docs[:max_docs]:
             results.append(
-                {"content": (getattr(d, "page_content", "") or "")[:600], "metadata": getattr(d, "metadata", {}) or {}}
+                {"content": (getattr(d, "page_content", "") or "")[:max_chars], "metadata": getattr(d, "metadata", {}) or {}}
             )
         return results
 
     def _debug_log(self, stage: str, query: str, docs_json: List[Dict[str, Any]]):
+        if not _LOG.isEnabledFor(logging.DEBUG):
+            return
         try:
             n = len(docs_json)
             top1 = docs_json[0] if n else {}
             top_meta = top1.get("metadata", {}) if isinstance(top1, dict) else {}
             top_content = (top1.get("content", "") if isinstance(top1, dict) else "")[:120]
-            print(f"[DEBUG:{stage}] query={query!r} docs_count={n}")
+            _LOG.debug("[DEBUG:%s] query=%r docs_count=%d", stage, query, n)
             if n:
-                print(f"[DEBUG:{stage}] top1_metadata_keys={list(top_meta.keys())[:8]}")
-                print(f"[DEBUG:{stage}] top1_content_120={top_content!r}")
+                _LOG.debug("[DEBUG:%s] top1_metadata_keys=%s", stage, list(top_meta.keys())[:8])
+                _LOG.debug("[DEBUG:%s] top1_content_120=%r", stage, top_content)
         except Exception:
             pass
+
+    # --------------------------
+    # Phase 3 helpers
+    # --------------------------
+    def _extract_available_phase3_sections(self, docs: List[Dict[str, Any]]) -> List[str]:
+        """Return list of canonical section labels that exist in the retrieved docs."""
+        available: List[str] = []
+        for label in self._PHASE3_CANONICAL:
+            if label == "ทั้งหมด":
+                continue
+            sig = self._SECTION_SIGNALS.get(label)
+            if not sig:
+                continue
+            meta_keys = sig.get("meta_keys") or []
+            content_kws = sig.get("content_keywords") or []
+            found = False
+            for d in docs:
+                md = d.get("metadata", {}) or {}
+                for k in meta_keys:
+                    v = md.get(k)
+                    if v is not None and str(v).strip() and str(v).lower() != "nan":
+                        found = True
+                        break
+                if found:
+                    break
+                content = d.get("content", "") or ""
+                for kw in content_kws:
+                    if kw and kw in content:
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                available.append(label)
+        return available
+
+    def _user_requests_specific_sections(self, user_text: str) -> bool:
+        """Return True if the user explicitly asked for a named section (skip phase3 menu)."""
+        t = self._normalize_for_intent(user_text)
+        for label in self._PHASE3_CANONICAL:
+            if label == "ทั้งหมด":
+                continue
+            # Check shortened keywords from canonical labels
+            for word in label.split():
+                if len(word) >= 4 and word in t:
+                    return True
+        return False
+
+    def _is_continuation_question(self, user_text: str) -> bool:
+        """Return True if user is asking 'what else / what next' — should bypass Phase 3 and answer directly."""
+        return bool(self._CONTINUATION_RE.search(user_text or ""))
+
+    def _should_trigger_phase3(self, ans: str, available: List[str]) -> bool:
+        """Return True if the answer is long enough and there are enough sections to offer a menu."""
+        if len(available) < self._PHASE3_MIN_SECTIONS:
+            return False
+        if len(ans) >= self._PHASE3_ANSWER_CHAR_THRESHOLD:
+            return True
+        lines = [ln for ln in ans.splitlines() if ln.strip()]
+        if len(lines) >= self._PHASE3_ANSWER_LINE_THRESHOLD:
+            return True
+        return False
+
+    def _render_phase3_menu(self, available: List[str]) -> Tuple[str, List[str]]:
+        """Render a numbered section menu. Returns (menu_text, options_list)."""
+        options = list(available) + [self._PHASE3_ALL]
+        lines = [self._PHASE3_MENU_HEADER]
+        for i, opt in enumerate(options, 1):
+            lines.append(f"{i}) {opt}")
+        return "\n".join(lines), options
 
     # --------------------------
     # ENTRYPOINT
@@ -791,6 +943,7 @@ class PracticalPersonaService:
         user_text = (user_input or "").strip()
         norm = self._normalize_for_intent(user_text)
 
+        # ✅ recovery only in non-internal, owner-gated (already inside the function)
         if not _internal:
             self._maybe_recover_pending_slot_from_last_bot(state, user_text)
 
@@ -801,6 +954,7 @@ class PracticalPersonaService:
         if (not _internal) and isinstance((state.context or {}).get("pending_slot"), dict):
             pending_key_before = (state.context.get("pending_slot") or {}).get("key")
 
+        # ✅ ALWAYS allow pending_slot consumption (this is the core requirement)
         if (not _internal) and user_text:
             pending_status = self._consume_pending_slot_from_user(state, user_text)
 
@@ -839,19 +993,26 @@ class PracticalPersonaService:
                     state.round = int(getattr(state, "round", 0) or 0) + 1
                     return state, msg
 
-        if (not _internal) and self._looks_like_satisfaction(user_text):
-            self._append_user_once(state, user_input)
-            msg = self._reply_satisfaction(state)
-            self._append_assistant(state, msg)
-            state.round = int(getattr(state, "round", 0) or 0) + 1
-            return state, msg
+        # --------------------------
+        # Supervisor-owned menu: do not render greeting/menu here
+        # --------------------------
+        if (not _internal) and self._supervisor_owns_menu(state):
+            # Still allow satisfaction to be treated as normal text flow; no menu injection.
+            pass
+        else:
+            if (not _internal) and self._looks_like_satisfaction(user_text):
+                self._append_user_once(state, user_input)
+                msg = self._reply_satisfaction(state)
+                self._append_assistant(state, msg)
+                state.round = int(getattr(state, "round", 0) or 0) + 1
+                return state, msg
 
-        if (not _internal) and self._looks_like_greeting(user_text) and not filled_topic_value and not bypassed_menu:
-            self._append_user_once(state, user_input)
-            msg = self._reply_greeting_with_choices(state, kind="greet")
-            self._append_assistant(state, msg)
-            state.round = int(getattr(state, "round", 0) or 0) + 1
-            return state, msg
+            if (not _internal) and self._looks_like_greeting(user_text) and not filled_topic_value and not bypassed_menu:
+                self._append_user_once(state, user_input)
+                msg = self._reply_greeting_with_choices(state, kind="greet")
+                self._append_assistant(state, msg)
+                state.round = int(getattr(state, "round", 0) or 0) + 1
+                return state, msg
 
         # ✅ DEDUPE: only append once
         if not _internal:
@@ -862,14 +1023,16 @@ class PracticalPersonaService:
         if (not _internal) and ("ประเภท" in (last_bot or "")) and (
             self._DONT_KNOW_RE.match(norm) or self._ASK_TYPES_RE.search(norm)
         ):
-            menu = self._get_topic_menu(state)
-            state.context["pending_slot"] = {"key": "topic", "options": menu, "allow_multi": False}
-            state.context["main_menu_shown"] = True  # ✅ keep consistent if it happens here
-            msg = "ได้ครับ\n" + self._format_numbered_options(menu)
-            msg = self._apply_practical_lint(msg, kind="menu")
-            self._append_assistant(state, msg)
-            state.round = int(getattr(state, "round", 0) or 0) + 1
-            return state, msg
+            # If supervisor owns menu, don't inject topic menu here either.
+            if not self._supervisor_owns_menu(state):
+                menu = self._get_topic_menu(state)
+                state.context["pending_slot"] = {"key": "topic", "options": menu, "allow_multi": False}
+                state.context["main_menu_shown"] = True
+                msg = self._format_numbered_options(menu)
+                msg = self._apply_practical_lint(msg, kind="menu")
+                self._append_assistant(state, msg)
+                state.round = int(getattr(state, "round", 0) or 0) + 1
+                return state, msg
 
         # If user picked topic -> always retrieve for that topic
         if (not _internal) and filled_topic_value:
@@ -932,7 +1095,7 @@ ROUND: {int(getattr(state, "round", 0) or 0)}/{int(getattr(conf, "MAX_ROUNDS", 7
 Your JSON response:
 """
 
-        decision = self._call_llm_json(prompt)
+        decision = self._call_llm_json(prompt, state=state)
         action = (decision.get("action") or "ask").strip()
         exec_ = decision.get("execution", {}) or {}
 
@@ -955,7 +1118,13 @@ Your JSON response:
 
             pending = state.context.get("pending_slot")
             if not isinstance(pending, dict):
-                parsed_opts = self._extract_numbered_options(question)
+                # Prefer LLM-provided slot_options over regex extraction
+                llm_opts = exec_.get("slot_options")
+                if isinstance(llm_opts, list):
+                    llm_opts = [str(o).strip() for o in llm_opts if str(o).strip()]
+                else:
+                    llm_opts = []
+                parsed_opts = llm_opts or self._extract_numbered_options(question)
                 if parsed_opts:
                     slot_key = self._infer_slot_key_from_question(question)
                     allow_multi = True if slot_key == self._PHASE3_SLOT_KEY else False
@@ -965,11 +1134,28 @@ Your JSON response:
             if isinstance(pending2, dict):
                 options = pending2.get("options")
                 if isinstance(options, list) and options:
-                    menu = self._format_numbered_options(options)
-                    if "1)" not in question and any(str(opt) in question for opt in options) is False:
+                    # Sanitize question: strip inline option text the LLM may have embedded
+                    # e.g. "(บริษัทจำกัด (ห้างหุ้นส่วน" or "กรุงเทพฯ หรืออยู่ต่างจังหวัด"
+                    q_clean = question
+                    for opt in options:
+                        # Remove (opt) or (opt<no-closing-paren> patterns
+                        q_clean = re.sub(r'\s*\(' + re.escape(str(opt)) + r'\)?', ' ', q_clean)
+                        # Remove trailing " หรือ opt" or " หรืออยู่ opt"
+                        q_clean = re.sub(
+                            r'\s+หรือ(?:อยู่|ไปที่|ว่า)?\s*' + re.escape(str(opt)) + r'\s*(?:ครับ|คะ|คะ)?$',
+                            'ครับ', q_clean
+                        )
+                    q_clean = re.sub(r'\s+', ' ', q_clean).strip()
+                    # Ensure ends with ครับ
+                    if q_clean and not any(q_clean.endswith(e) for e in ('ครับ', 'คะ', 'คะ', '?', 'ไหม')):
+                        q_clean = q_clean.rstrip('?').rstrip() + 'ครับ'
+                    question = q_clean
+
+                    # Always append numbered menu unless already numbered (Issues 2, 5)
+                    if "1)" not in question and "1." not in question:
+                        menu = self._format_numbered_options(options)
                         question = question.rstrip() + "\n" + menu
 
-            # P0: enforce practical policy after LLM
             question = self._apply_practical_lint(question, kind="ask")
 
             self._append_assistant(state, question)
@@ -984,16 +1170,15 @@ Your JSON response:
             if isinstance(exec_.get("context_update", {}), dict):
                 state.context.update(exec_.get("context_update", {}))
 
-            # P0: enforce practical policy after LLM (answers too)
             ans = self._apply_practical_lint(ans, kind="answer")
 
             # P1: intent-aware phase3 trigger
             if not _internal:
+                # These functions must exist in your full file (see note above).
                 available = self._extract_available_phase3_sections(state.current_docs or [])
                 requested_sections = self._user_requests_specific_sections(user_text)
 
-                # If user explicitly requested a section, do NOT show menu (answer directly)
-                if not requested_sections:
+                if not requested_sections and not self._is_continuation_question(user_text):
                     if self._should_trigger_phase3(ans, available):
                         menu_text, options = self._render_phase3_menu(available)
                         state.context["pending_slot"] = {

@@ -1,6 +1,6 @@
 # code/model/conversation_state.py
 """
-Conversation State Model (v2 Final)
+Conversation State Model (v3)
 
 Single source of truth for conversation lifecycle.
 This model is intentionally logic-light and framework-agnostic.
@@ -9,6 +9,10 @@ Production stability improvements:
 - ✅ Single source-of-truth for retrieval tracking: state.last_retrieval_query (+ optional cached mirror in context)
 - ✅ Explicit conversation locks in context (supervisor-level policy can rely on these)
 - ✅ Append-only + dedupe helpers: add_user_message_once / add_assistant_message_once
+- ✅ FIX: dedup now compares stripped content (prevents whitespace duplicates)
+- ✅ NEW: cross-persona slot memory (collected_slots) — saves answers across Practical → Academic
+- ✅ NEW: token usage tracking (total_prompt_tokens / total_completion_tokens)
+- ✅ NEW: trim_messages() — keeps last N messages to prevent unbounded growth
 """
 
 from __future__ import annotations
@@ -20,7 +24,6 @@ from pydantic import BaseModel, Field, ConfigDict
 class ConversationState(BaseModel):
     """
     Maintains full conversation state, including:
-
     - Session identity
     - Persona & behavior configuration
     - User-visible conversation history
@@ -28,9 +31,9 @@ class ConversationState(BaseModel):
     - Context memory (slots / facts / flags)
     - Retrieved documents (RAG)
     - Multi-step round tracking
+    - Token budget tracking
     """
 
-    # allow forward compatibility
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         extra="allow",
@@ -39,17 +42,12 @@ class ConversationState(BaseModel):
     # ------------------------------------------------------------------
     # Identity
     # ------------------------------------------------------------------
-
     session_id: str = Field(default="", description="Conversation session identifier")
 
     # ------------------------------------------------------------------
     # Persona & behavior
     # ------------------------------------------------------------------
-
-    persona_id: str = Field(
-        default="practical",
-        description="Active persona id (academic / practical)",
-    )
+    persona_id: str = Field(default="practical", description="Active persona id (academic / practical)")
 
     strict_profile: Dict[str, Any] = Field(
         default_factory=lambda: {
@@ -65,72 +63,41 @@ class ConversationState(BaseModel):
     # ------------------------------------------------------------------
     # Conversation history
     # ------------------------------------------------------------------
-
-    messages: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="User-visible chat history",
-    )
-
-    internal_messages: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="Internal system / agent traces (hidden from user)",
-    )
+    messages: List[Dict[str, Any]] = Field(default_factory=list, description="User-visible chat history")
+    internal_messages: List[Dict[str, Any]] = Field(default_factory=list, description="Internal system / agent traces (hidden from user)")
 
     # ------------------------------------------------------------------
     # Context & memory
     # ------------------------------------------------------------------
-
-    context: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Structured context memory (facts, slots, flags)",
-    )
-
-    requirements: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Latest requirements inferred by LLM (optional)",
-    )
+    context: Dict[str, Any] = Field(default_factory=dict, description="Structured context memory (facts, slots, flags)")
+    requirements: Dict[str, Any] = Field(default_factory=dict, description="Latest requirements inferred by LLM (optional)")
 
     # ------------------------------------------------------------------
     # RAG
     # ------------------------------------------------------------------
-
-    current_docs: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="Documents retrieved for current turn (RAG)",
-    )
+    current_docs: List[Dict[str, Any]] = Field(default_factory=list, description="Documents retrieved for current turn (RAG)")
 
     # ------------------------------------------------------------------
     # Retrieval tracking (deterministic guardrails)
     # ------------------------------------------------------------------
+    last_retrieval_query: Optional[str] = Field(default=None, description="Last retrieval query used (source-of-truth)")
+    last_retrieval_topic: Optional[str] = Field(default=None, description="Optional last topic label (if available)")
 
-    last_retrieval_query: Optional[str] = Field(
-        default=None,
-        description="Last retrieval query used (source-of-truth)",
-    )
-
-    last_retrieval_topic: Optional[str] = Field(
-        default=None,
-        description="Optional last topic label (if available)",
-    )
+    # ------------------------------------------------------------------
+    # Token budget tracking (L2: cost observability)
+    # ------------------------------------------------------------------
+    total_prompt_tokens: int = Field(default=0, description="Cumulative prompt tokens used in this session")
+    total_completion_tokens: int = Field(default=0, description="Cumulative completion tokens used in this session")
 
     # ------------------------------------------------------------------
     # Control & debug
     # ------------------------------------------------------------------
-
-    round: int = Field(
-        default=0,
-        description="Current multi-step round counter",
-    )
-
-    last_action: Optional[str] = Field(
-        default=None,
-        description="Last high-level action taken by agent (ask / retrieve / answer)",
-    )
+    round: int = Field(default=0, description="Current multi-step round counter")
+    last_action: Optional[str] = Field(default=None, description="Last high-level action taken by agent (ask / retrieve / answer)")
 
     # ------------------------------------------------------------------
     # Helpers (NO business logic)
     # ------------------------------------------------------------------
-
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
 
@@ -138,27 +105,24 @@ class ConversationState(BaseModel):
         self.messages.append({"role": "assistant", "content": content})
 
     def add_user_message_once(self, content: str) -> None:
-        """
-        Append-only + dedupe:
-        - If last visible message is identical user content, do not append.
-        """
-        c = (content or "")
-        if not c.strip():
+        # FIX: strip before compare to prevent whitespace-variant duplicates
+        c = (content or "").strip()
+        if not c:
             return
-        if self.messages and self.messages[-1].get("role") == "user" and (self.messages[-1].get("content") or "") == c:
+        if (
+            self.messages
+            and self.messages[-1].get("role") == "user"
+            and (self.messages[-1].get("content") or "").strip() == c
+        ):
             return
         self.messages.append({"role": "user", "content": c})
 
     def add_assistant_message_once(self, content: str) -> None:
-        """
-        Append-only + dedupe:
-        - If last visible message is identical assistant content, do not append.
-        """
         c = (content or "").strip()
         if not c:
             return
         if self.messages and self.messages[-1].get("role") == "assistant":
-            if ((self.messages[-1].get("content") or "").strip() == c):
+            if (self.messages[-1].get("content") or "").strip() == c:
                 return
         self.messages.append({"role": "assistant", "content": c})
 
@@ -172,30 +136,21 @@ class ConversationState(BaseModel):
     # Locks (explicit supervisor contract)
     # --------------------------
     def set_persona_lock(self, persona_id: Optional[str]) -> None:
-        """
-        Explicit lock that supervisor can rely on.
-        - persona_id: "academic" / "practical" / None
-        Stored in context as: context["lock_persona"]
-        """
         self.context = self.context or {}
-        if persona_id:
-            self.context["lock_persona"] = str(persona_id)
+        if persona_id and isinstance(persona_id, str) and persona_id.strip():
+            self.context["lock_persona"] = str(persona_id).strip()
         else:
             self.context.pop("lock_persona", None)
 
     def get_persona_lock(self) -> Optional[str]:
         self.context = self.context or {}
         v = self.context.get("lock_persona")
-        return str(v) if isinstance(v, str) and v.strip() else None
+        return str(v).strip() if isinstance(v, str) and str(v).strip() else None
 
     # --------------------------
     # Retrieval tracking helpers
     # --------------------------
     def set_last_retrieval_query(self, query: Optional[str], cache_to_context: bool = True) -> None:
-        """
-        Source-of-truth setter for retrieval query.
-        Optionally mirrors into context for backward compatibility only.
-        """
         q = (query or "").strip() if query is not None else None
         self.last_retrieval_query = q if q else None
 
@@ -207,20 +162,66 @@ class ConversationState(BaseModel):
                 self.context.pop("last_retrieval_query", None)
 
     def get_last_retrieval_query(self) -> Optional[str]:
-        """
-        Source-of-truth getter.
-        If last_retrieval_query is None, will fall back to context cache (legacy) and normalize.
-        """
         if self.last_retrieval_query and str(self.last_retrieval_query).strip():
             return str(self.last_retrieval_query).strip()
 
         self.context = self.context or {}
         v = self.context.get("last_retrieval_query")
         if isinstance(v, str) and v.strip():
-            # Do NOT permanently promote automatically (avoid surprising writes),
-            # but return for compatibility.
             return v.strip()
         return None
+
+    # --------------------------
+    # Cross-persona slot memory (NEW)
+    # Allows Practical persona answers to be remembered when entering Academic
+    # --------------------------
+    def save_collected_slot(self, key: str, value: str) -> None:
+        """Save a user-provided slot value, shared across personas."""
+        self.context = self.context or {}
+        slots = self.context.get("collected_slots") or {}
+        if not isinstance(slots, dict):
+            slots = {}
+        if key and str(key).strip():
+            slots[str(key).strip()] = str(value).strip()
+        self.context["collected_slots"] = slots
+
+    def get_collected_slots(self) -> Dict[str, str]:
+        """Return all cross-persona collected slots (key→value map)."""
+        raw = (self.context or {}).get("collected_slots")
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items() if k and v}
+        return {}
+
+    def get_collected_slot(self, key: str) -> Optional[str]:
+        """Return a single slot value, or None if not collected yet."""
+        return self.get_collected_slots().get(str(key).strip())
+
+    # --------------------------
+    # Token budget tracking (NEW)
+    # --------------------------
+    def add_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        """Accumulate token usage across all LLM calls in this session."""
+        self.total_prompt_tokens += max(0, int(prompt_tokens or 0))
+        self.total_completion_tokens += max(0, int(completion_tokens or 0))
+
+    @property
+    def total_tokens(self) -> int:
+        return self.total_prompt_tokens + self.total_completion_tokens
+
+    # --------------------------
+    # State trimming (NEW)
+    # --------------------------
+    def trim_messages(self, keep_last: int = 20) -> None:
+        """
+        Keep only the last N messages to prevent unbounded memory growth.
+        System messages (role='system') are always preserved.
+        """
+        if len(self.messages) <= keep_last:
+            return
+        system_msgs = [m for m in self.messages if m.get("role") == "system"]
+        non_system = [m for m in self.messages if m.get("role") != "system"]
+        trimmed = non_system[-keep_last:]
+        self.messages = system_msgs + trimmed
 
     # --------------------------
     # Round / docs helpers
@@ -235,9 +236,6 @@ class ConversationState(BaseModel):
         self.current_docs = []
 
     def snapshot(self) -> Dict[str, Any]:
-        """
-        Lightweight snapshot for debugging / logging.
-        """
         return {
             "session_id": self.session_id,
             "persona_id": self.persona_id,
@@ -246,5 +244,6 @@ class ConversationState(BaseModel):
             "num_docs": len(self.current_docs),
             "last_retrieval_query": self.last_retrieval_query,
             "lock_persona": (self.context or {}).get("lock_persona"),
+            "total_tokens": self.total_tokens,
+            "collected_slots_count": len(self.get_collected_slots()),
         }
-    

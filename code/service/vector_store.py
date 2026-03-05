@@ -1,4 +1,3 @@
-# code/service/vector_store.py
 """
 Vector Store Adapter
 Manages vector database operations with Zilliz/Milvus
@@ -9,10 +8,16 @@ from __future__ import annotations
 from typing import List, Dict
 
 from langchain_core.documents import Document
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Milvus
 
 import conf
+
+
+# ---- Embeddings import (forward-compatible) ----
+try:
+    from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
+except Exception:
+    from langchain_community.embeddings import HuggingFaceEmbeddings  # type: ignore
 
 
 def _stringify_metadata(metadata: dict) -> dict:

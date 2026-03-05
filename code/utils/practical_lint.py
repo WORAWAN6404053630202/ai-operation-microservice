@@ -40,6 +40,19 @@ class PracticalPolicyConfig:
         "vector",
         "chroma",
         "embedding",
+
+        # NEW: additional meta-talk patterns LLMs commonly produce
+        "ขอบอกด้วยว่า",
+        "ตามที่ท่านขอ",
+        "ตามที่คุณขอ",
+        "กล่าวคือ",
+        "ในฐานะ",
+        "นโยบาย",
+        "assistant",
+        "โดยสรุป",      # ไม่เหมาะกับ practical ที่ต้องตอบตรง
+        "documents",    # LLM บางตัว reproduce prompt section header ออกมา
+        "Documents",
+        "DOCUMENTS",
     )
 
     # “อ้อม/เมตา” patterns (behavior-level) — applies to NON-QUOTE lines only
@@ -135,9 +148,11 @@ _Q_PREFIX_RE = re.compile(r"^\s*(ถาม|คำถาม)\s*[:：]", re.IGNORE
 _Q_NUM_LINE_RE = re.compile(r"^\s*\d+\)\s+.*\?$", re.IGNORECASE)
 
 # A) Question line that contains conjunctions tends to mean "A and B?" => multi-question risk
-# We treat it as 2 questions (counts as +2 instead of +1)
+# FIX: tightened pattern — require a question marker on the SAME line to avoid false positives
+# on compound nouns like "ร้านอาหารและบาร์" or phrases with "กับ" that are not questions.
+# Removed "หรือ" (too broad as a question-forming particle) and "กับ" (too common in compound nouns).
 _MULTI_Q_CONJ_RE = re.compile(
-    r"(?:\bและ\b|\bหรือ\b|พร้อมกับ|รวมถึง|ตลอดจน|กับ)\s+.+",  # has conjunction + another clause
+    r"(?:\bและ\b|พร้อมกับ|รวมถึง|ตลอดจน)\s+.+(?:ไหม|หรือไม่|หรือเปล่า|\?)",
     re.IGNORECASE,
 )
 

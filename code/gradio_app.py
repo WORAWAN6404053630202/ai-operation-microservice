@@ -1,8 +1,8 @@
-# code/gradio_app.py
 from __future__ import annotations
 
+import socket
 import uuid
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 
 import gradio as gr
 
@@ -12,55 +12,12 @@ from model.persona_supervisor import PersonaSupervisor
 from service.local_vector_store import get_retriever
 
 
-# -----------------------------
-# State + Debug
-# -----------------------------
-def create_initial_state(session_id: str) -> ConversationState:
-    return ConversationState(
-        session_id=session_id,
-        persona_id="practical",
-        context={},
-    )
-
-
-def _debug_line(state: ConversationState) -> str:
-    ctx = state.context or {}
-
-    pending = ctx.get("pending_slot")
-    pending_txt = "-"
-    if isinstance(pending, dict):
-        key = pending.get("key") or "-"
-        opts = pending.get("options") or []
-        try:
-            nopts = len(opts)
-        except Exception:
-            nopts = "?"
-        pending_txt = f"{key}({nopts})"
-    elif pending:
-        pending_txt = str(pending)
-
-    last_action = getattr(state, "last_action", "-")
-    fsm = (ctx.get("fsm_state") or "-")
-    did_greet = bool(ctx.get("did_greet"))
-    greet_streak = ctx.get("greet_streak", "-")
-    persona_id = getattr(state, "persona_id", "-") or "-"
-
-    return (
-        f"last_action={last_action} | fsm={fsm} | pending_slot={pending_txt} | "
-        f"did_greet={did_greet} | greet_streak={greet_streak} | persona={persona_id}"
-    )
-
-
-def _pretty_debug(state: ConversationState) -> str:
-    return f"```text\nDEBUG {_debug_line(state)}\n```"
-
-
-# -----------------------------
-# Lazy Runtime
-# -----------------------------
+# ============================================================
+# Runtime singletons
+# ============================================================
 _STATE_MANAGER = StateManager()
 _RETRIEVER = None
-_SUPERVISOR = None
+_SUPERVISOR: Optional[PersonaSupervisor] = None
 
 
 def _ensure_runtime() -> PersonaSupervisor:
@@ -72,179 +29,322 @@ def _ensure_runtime() -> PersonaSupervisor:
     return _SUPERVISOR
 
 
-# -----------------------------
-# Session Logic
-# -----------------------------
+# ============================================================
+# State helpers
+# ============================================================
 def _new_session_id() -> str:
     return str(uuid.uuid4())[:8]
 
 
-def init_session():
+def create_initial_state(session_id: str) -> ConversationState:
+    return ConversationState(
+        session_id=session_id,
+        persona_id="practical",
+        context={},
+    )
+
+
+def _safe_load_state(session_id: str) -> ConversationState:
+    st = _STATE_MANAGER.load(session_id) if session_id else None
+    if st is None:
+        sid = session_id or _new_session_id()
+        st = create_initial_state(sid)
+        _STATE_MANAGER.save(sid, st)
+    return st
+
+
+def _session_label(st: ConversationState) -> str:
+    sid = getattr(st, "session_id", "") or "-"
+    persona = getattr(st, "persona_id", "") or "-"
+    return f"{sid} • mode: {persona}"
+
+
+# ============================================================
+# Session operations
+# Chat UI expects: List[{"role":"user|assistant", "content":"..."}]
+# ============================================================
+def _init_session() -> Tuple[str, ConversationState, List[Dict[str, str]], str]:
     supervisor = _ensure_runtime()
-    session_id = _new_session_id()
+    sid = _new_session_id()
+    st = create_initial_state(sid)
+    _STATE_MANAGER.save(sid, st)
 
-    state = create_initial_state(session_id)
-    _STATE_MANAGER.save(session_id, state)
+    st, greet = supervisor.handle(state=st, user_input="")
+    _STATE_MANAGER.save(sid, st)
 
-    state, greet = supervisor.handle(state=state, user_input="")
-    _STATE_MANAGER.save(session_id, state)
-
-    history: List[Dict] = []
+    history: List[Dict[str, str]] = []
     if greet:
         history.append({"role": "assistant", "content": greet})
 
-    return session_id, state, history, _pretty_debug(state)
+    return sid, st, history, _session_label(st)
 
 
-def on_send(user_text: str, session_id: str, history: List[Dict]):
+def on_send(user_text: str, session_id: str, history: List[Dict[str, str]]):
     supervisor = _ensure_runtime()
-
     user_text = (user_text or "").strip()
+
+    st = _safe_load_state(session_id)
+
     if not user_text:
-        st = _STATE_MANAGER.load(session_id) or create_initial_state(session_id)
-        return "", session_id, history, _pretty_debug(st), session_id, history
+        history = history or []
+        return "", st.session_id, history, _session_label(st), history
 
-    state = _STATE_MANAGER.load(session_id)
-    if state is None:
-        state = create_initial_state(session_id)
-        _STATE_MANAGER.save(session_id, state)
-
-    state, reply = supervisor.handle(state=state, user_input=user_text)
-    _STATE_MANAGER.save(session_id, state)
+    st, reply = supervisor.handle(state=st, user_input=user_text)
+    _STATE_MANAGER.save(st.session_id, st)
 
     history = history or []
     history.append({"role": "user", "content": user_text})
-    history.append({"role": "assistant", "content": reply})
+    history.append({"role": "assistant", "content": reply or ""})
 
-    return "", session_id, history, _pretty_debug(state), session_id, history
+    return "", st.session_id, history, _session_label(st), history
+
+
+def on_new_session():
+    sid, st, history, label = _init_session()
+    return sid, st, history, label, history
 
 
 def on_reset(session_id: str):
     supervisor = _ensure_runtime()
 
     if not session_id:
-        sid, st, hist, dbg = init_session()
-        return sid, st, hist, dbg, sid, hist
+        sid, st, history, label = _init_session()
+        return sid, st, history, label, history
 
-    state = create_initial_state(session_id)
-    _STATE_MANAGER.save(session_id, state)
+    st = create_initial_state(session_id)
+    _STATE_MANAGER.save(session_id, st)
 
-    state, greet = supervisor.handle(state=state, user_input="")
-    _STATE_MANAGER.save(session_id, state)
+    st, greet = supervisor.handle(state=st, user_input="")
+    _STATE_MANAGER.save(session_id, st)
 
-    history: List[Dict] = []
+    history: List[Dict[str, str]] = []
     if greet:
         history.append({"role": "assistant", "content": greet})
 
-    return session_id, state, history, _pretty_debug(state), session_id, history
-
-
-def on_new_session():
-    sid, st, hist, dbg = init_session()
-    return sid, st, hist, dbg, sid, hist
+    return session_id, st, history, _session_label(st), history
 
 
 def on_clear_chat(session_id: str):
-    st = _STATE_MANAGER.load(session_id) or create_initial_state(session_id)
-    _STATE_MANAGER.save(session_id, st)
-    hist: List[Dict] = []
-    return session_id, st, hist, _pretty_debug(st), session_id, hist
+    st = _safe_load_state(session_id)
+    history: List[Dict[str, str]] = []
+    return st.session_id, st, history, _session_label(st), history
 
 
-# -----------------------------
-# UI (SaaS-like)
-# -----------------------------
+# ============================================================
+# Networking helper
+# ============================================================
+def _best_lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+# ============================================================
+# UI/UX CSS
+# ============================================================
 CUSTOM_CSS = """
 :root{
-  --bg0:#0b1220;
-  --bg1:#0f1a2d;
-  --card:rgba(255,255,255,0.06);
-  --card2:rgba(255,255,255,0.08);
-  --border:rgba(255,255,255,0.10);
-  --text:rgba(255,255,255,0.92);
-  --muted:rgba(255,255,255,0.70);
+  --bg0:#070a12;
+  --bg1:#0b1220;
+
+  --panel:rgba(255,255,255,0.07);
+  --panel2:rgba(255,255,255,0.04);
+  --border:rgba(255,255,255,0.14);
+
+  --text:rgba(255,255,255,0.95);
+  --muted:rgba(255,255,255,0.74);
+
+  --brand:rgba(255,140,0,0.95);
+  --brandSoft:rgba(255,140,0,0.18);
+
+  --shadow: 0 18px 60px rgba(0,0,0,0.38);
 }
 
 body, .gradio-container{
-  background: radial-gradient(1200px 600px at 20% 0%, rgba(120,70,255,0.25), transparent 60%),
-              radial-gradient(1000px 600px at 90% 10%, rgba(60,180,255,0.18), transparent 55%),
-              linear-gradient(180deg, var(--bg0), var(--bg1));
+  background:
+    radial-gradient(1200px 700px at 15% 0%, rgba(116,72,255,0.22), transparent 60%),
+    radial-gradient(1000px 700px at 90% 10%, rgba(60,180,255,0.14), transparent 55%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
 }
 
 .gradio-container{ max-width: 1180px !important; }
+.gr-row { flex-wrap: wrap !important; gap: 14px !important; }
 
-#appbar{
+#topbar{
   border-radius: 22px;
   padding: 16px 18px;
-  background: linear-gradient(135deg, rgba(255,255,255,0.10), rgba(255,255,255,0.05));
+  background: linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.06));
   border: 1px solid var(--border);
-  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+  box-shadow: var(--shadow);
   color: var(--text);
 }
-
-.badge{
-  display:inline-flex; align-items:center; gap:8px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.10);
-  border: 1px solid var(--border);
+#brand_title{
+  font-size: 28px;
+  font-weight: 900;
+  letter-spacing: 0.4px;
+  line-height: 1.2;
+  color: var(--text);
+}
+#brand_subtitle{
+  margin-top: 6px;
+  font-size: 14px;
+  line-height: 1.45;
   color: var(--muted);
-  font-size: 12px;
+  max-width: 900px;
 }
 
 .card{
   border-radius: 18px;
   padding: 12px 12px;
-  background: var(--card);
+  background: var(--panel);
   border: 1px solid var(--border);
-  box-shadow: 0 8px 22px rgba(0,0,0,0.22);
+  box-shadow: 0 10px 32px rgba(0,0,0,0.25);
   color: var(--text);
-}
-
-.card h3{
-  margin: 6px 0 10px 0;
 }
 
 #chatwrap{
   border-radius: 18px;
-  background: var(--card);
+  background: var(--panel);
   border: 1px solid var(--border);
   overflow: hidden;
-  box-shadow: 0 10px 28px rgba(0,0,0,0.25);
+  box-shadow: var(--shadow);
 }
 
 #composer{
   border-radius: 18px;
   padding: 12px;
-  background: var(--card);
+  background: var(--panel);
   border: 1px solid var(--border);
+  box-shadow: 0 10px 32px rgba(0,0,0,0.20);
+}
+
+.gr-text-input textarea,
+.gr-text-input input,
+textarea, input{
+  background: rgba(10,14,24,0.78) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text) !important;
+  caret-color: var(--text) !important;
+  border-radius: 14px !important;
+  -webkit-text-fill-color: var(--text) !important;
+}
+
+.gr-text-input textarea::placeholder,
+.gr-text-input input::placeholder,
+textarea::placeholder, input::placeholder{
+  color: rgba(255,255,255,0.55) !important;
 }
 
 #sendbtn button{
-  height: 44px;
+  height: 46px;
   border-radius: 14px !important;
+  font-weight: 800;
+  background: rgba(255,140,0,0.30) !important;
+  border: 1px solid rgba(255,140,0,0.35) !important;
 }
 
-#controls button{
-  border-radius: 14px !important;
-}
-
-.small-muted{
-  color: var(--muted);
+#helpbox{
+  margin-top: 10px;
+  padding: 10px 10px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: rgba(255,255,255,0.82);
   font-size: 13px;
+  line-height: 1.45;
 }
 
-.gr-markdown, .gr-label, label, .wrap{
-  color: var(--text) !important;
-}
-
-textarea, input{
-  background: rgba(255,255,255,0.06) !important;
-  border: 1px solid var(--border) !important;
-  color: var(--text) !important;
+@media (max-width: 980px){
+  .gradio-container{ padding: 10px !important; }
+  #topbar{ border-radius: 16px; }
+  #chatwrap{ border-radius: 16px; }
+  #composer{ border-radius: 16px; }
 }
 
 footer{ display:none !important; }
+"""
+
+
+# ============================================================
+# JS (run via gradio event system): Enter send, Shift+Enter newline
+# IMPORTANT: This must be a JS FUNCTION BODY string (no <script> tags)
+# ============================================================
+ENTER_TO_SEND_JS_ON_LOAD = r"""
+() => {
+  const SELECTORS = [
+    "#user_input textarea",
+    "[id='user_input'] textarea",
+    "[id*='user_input'] textarea",
+  ];
+
+  function findTextarea() {
+    for (const sel of SELECTORS) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    // fallback: first visible textarea in the composer area
+    const all = Array.from(document.querySelectorAll("textarea"));
+    return all.find(t => t.offsetParent !== null) || null;
+  }
+
+  function findSendButton() {
+    return document.querySelector("#sendbtn button") || null;
+  }
+
+  function insertNewline(textarea) {
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? textarea.value.length;
+    textarea.setRangeText("\n", start, end, "end");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function bind() {
+    const textarea = findTextarea();
+    const sendBtn = findSendButton();
+    if (!textarea || !sendBtn) return false;
+
+    if (textarea.dataset.boundEnterSend === "1") return true;
+    textarea.dataset.boundEnterSend = "1";
+
+    // Capture phase on textarea itself
+    textarea.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+
+      // Shift+Enter -> newline
+      if (e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        insertNewline(textarea);
+        return;
+      }
+
+      // Enter -> send
+      e.preventDefault();
+      e.stopPropagation();
+      sendBtn.click();
+    }, true);
+
+    return true;
+  }
+
+  // Retry because Gradio mounts asynchronously
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries += 1;
+    const ok = bind();
+    if (ok || tries > 80) clearInterval(timer);
+  }, 200);
+
+  return [];
+}
 """
 
 
@@ -252,111 +352,94 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(title="RESTBIZ Persona AI") as demo:
         session_id_state = gr.State("")
         state_obj = gr.State(None)
-        chat_history = gr.State([])
+        chat_history = gr.State([])  # List[Dict] messages
 
         gr.Markdown(
             """
-<div id="appbar">
-  <div style="display:flex; align-items:center; justify-content:space-between; gap:14px;">
-    <div>
-      <div style="font-size:22px; font-weight:800; letter-spacing:0.2px;">RESTBIZ Persona AI</div>
-      <div class="small-muted">Regulatory assistant • Persona supervisor • RAG-backed</div>
-    </div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
-      <span class="badge">⚡ Deterministic greet</span>
-      <span class="badge">🧠 StateManager</span>
-      <span class="badge">🔎 Retriever k=20</span>
-    </div>
-  </div>
+<div id="topbar">
+  <div id="brand_title">RESTBIZ</div>
+  <div id="brand_subtitle">ผู้ช่วยด้านกฎหมาย สำหรับธุรกิจร้านอาหาร</div>
 </div>
 """,
-            elem_id="appbar",
+            elem_id="topbar",
         )
 
-        with gr.Row():
-            # Chat column
-            with gr.Column(scale=5):
+        with gr.Row(equal_height=False):
+            with gr.Column(scale=7, min_width=320, elem_id="chat_col"):
                 with gr.Group(elem_id="chatwrap"):
-                    chatbot = gr.Chatbot(
-                        label="Chat",
-                        height=600,
-                    )
+                    chatbot = gr.Chatbot(label="", height=640)
 
                 with gr.Group(elem_id="composer"):
-                    with gr.Row():
-                        user_input = gr.Textbox(
-                            label="Message",
-                            placeholder="พิมพ์คำถาม…",
-                            lines=2,
-                            max_lines=6,
+                    user_input = gr.Textbox(
+                        label="Message",
+                        placeholder="พิมพ์คำถาม…",
+                        lines=3,
+                        max_lines=10,
+                        elem_id="user_input",
+                    )
+                    send_btn = gr.Button("Send", variant="primary", elem_id="sendbtn")
+
+            with gr.Column(scale=3, min_width=260, elem_id="side_col"):
+                try:
+                    container = gr.Accordion("Session & Controls", open=True)
+                except Exception:
+                    container = gr.Group()
+
+                with container:
+                    with gr.Group(elem_classes=["card"], elem_id="sidebar_actions"):
+                        session_view = gr.Textbox(
+                            label="Session",
+                            interactive=False,
+                            placeholder="(auto)",
                         )
-                    with gr.Row():
-                        send_btn = gr.Button("Send", variant="primary", elem_id="sendbtn")
 
-            # Side column
-            with gr.Column(scale=3):
-                with gr.Group(elem_classes=["card"], elem_id="controls"):
-                    gr.Markdown("### Session Controls")
-                    btn_new = gr.Button("➕ New session", variant="primary")
-                    btn_reset = gr.Button("🔄 Reset session")
-                    btn_clear = gr.Button("🧹 Clear chat")
-                    session_view = gr.Textbox(
-                        label="Session ID",
-                        interactive=False,
-                        placeholder="(auto)",
-                    )
+                        gr.Markdown(
+                            """
+<div id="helpbox">
+  <div><b>New session</b> — เริ่มเซสชันใหม่</div>
+  <div><b>Reset session</b> — รีเซ็ตสถานะของเซสชันเดิม</div>
+  <div><b>Clear chat</b> — ล้างข้อความบนหน้าจอ</div>
+</div>
+""",
+                        )
 
-                with gr.Group(elem_classes=["card"]):
-                    gr.Markdown("### Debug")
-                    debug_box = gr.Markdown("```text\nDEBUG -\n```")
+                        btn_new = gr.Button("➕ New session", variant="primary")
+                        btn_reset = gr.Button("🔄 Reset session")
+                        btn_clear = gr.Button("🧹 Clear chat")
 
-                with gr.Group(elem_classes=["card"]):
-                    gr.Markdown(
-                        """
-### Tips
-- ถ้า state แปลก ๆ หรือ `pending_slot` ค้าง → กด **Reset session**
-- ถ้าจะเริ่มใหม่ทั้งหมด → กด **New session**
-- ถ้าจะล้างหน้าจออย่างเดียว → กด **Clear chat**
-"""
-                    )
-
-        # ---- init on load ----
         def _init():
-            sid, st, hist, dbg = init_session()
-            return sid, st, hist, dbg, sid, hist
+            sid, st, hist, label = _init_session()
+            return sid, st, hist, label, hist
 
+        # ✅ JS is executed reliably here (not via <script>)
         demo.load(
             _init,
-            outputs=[session_id_state, state_obj, chat_history, debug_box, session_view, chatbot],
+            outputs=[session_id_state, state_obj, chat_history, session_view, chatbot],
+            js=ENTER_TO_SEND_JS_ON_LOAD,
         )
 
-        # ---- send ----
         send_btn.click(
             on_send,
             inputs=[user_input, session_id_state, chat_history],
-            outputs=[user_input, session_id_state, chat_history, debug_box, session_view, chatbot],
-        )
-        user_input.submit(
-            on_send,
-            inputs=[user_input, session_id_state, chat_history],
-            outputs=[user_input, session_id_state, chat_history, debug_box, session_view, chatbot],
+            outputs=[user_input, session_id_state, chat_history, session_view, chatbot],
         )
 
-        # ---- controls ----
-        btn_reset.click(
-            on_reset,
-            inputs=[session_id_state],
-            outputs=[session_id_state, state_obj, chat_history, debug_box, session_view, chatbot],
-        )
+        # NOTE: DO NOT use user_input.submit — it conflicts with desired behavior.
+
         btn_new.click(
             on_new_session,
             inputs=[],
-            outputs=[session_id_state, state_obj, chat_history, debug_box, session_view, chatbot],
+            outputs=[session_id_state, state_obj, chat_history, session_view, chatbot],
+        )
+        btn_reset.click(
+            on_reset,
+            inputs=[session_id_state],
+            outputs=[session_id_state, state_obj, chat_history, session_view, chatbot],
         )
         btn_clear.click(
             on_clear_chat,
             inputs=[session_id_state],
-            outputs=[session_id_state, state_obj, chat_history, debug_box, session_view, chatbot],
+            outputs=[session_id_state, state_obj, chat_history, session_view, chatbot],
         )
 
     return demo
@@ -364,18 +447,29 @@ def build_app() -> gr.Blocks:
 
 def main():
     demo = build_app()
-    demo.launch(
-        server_name="127.0.0.1",
-        server_port=7860,
-        show_error=True,
-        share=False,
-        css=CUSTOM_CSS,
-        theme=gr.themes.Soft(
-            radius_size=gr.themes.sizes.radius_lg,
-            spacing_size=gr.themes.sizes.spacing_lg,
-            text_size=gr.themes.sizes.text_md,
-        ),
-    )
+    port = 3000
+    lan_ip = _best_lan_ip()
+
+    print("\n" + "=" * 60)
+    print(f"Open locally:  http://127.0.0.1:{port}")
+    print(f"Open on LAN:   http://{lan_ip}:{port}")
+    print("=" * 60 + "\n")
+
+    try:
+        demo.launch(
+            server_name="0.0.0.0",
+            server_port=port,
+            show_error=True,
+            share=False,
+            css=CUSTOM_CSS,
+        )
+    except TypeError:
+        demo.launch(
+            server_name="0.0.0.0",
+            server_port=port,
+            show_error=True,
+            share=False,
+        )
 
 
 if __name__ == "__main__":
