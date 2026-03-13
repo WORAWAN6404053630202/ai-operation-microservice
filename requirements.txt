@@ -30,5 +30,9 @@ gradio-client>=2,<3
 # --- Utilities ---
 requests>=2.31.0
 tqdm>=4.66.0
+pandas>=2.0.0
+
+# --- Testing (optional for dev) ---
+pytest>=7.4.0
 
 chromadb>=0.5.0
