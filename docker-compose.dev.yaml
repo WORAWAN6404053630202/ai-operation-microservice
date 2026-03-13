@@ -3,21 +3,26 @@ version: '3.9'
 
 services:
   serve:
-    container_name: ${CONTAINER_NAME}
-    image: ${DOCKER_REPO_USER}/${IMAGE_NAME}:${IMAGE_VERSION}
+    container_name: ai-operation-dev
+    image: ai-operation:dev
     platform: linux/amd64
     build:
       context: .
       target: develop
       dockerfile: ./Dockerfile
     ports:
-      - "${PORT}:3000"
+      - "3000:3000"
     volumes:
-      - ./code:/app
-      
+      # Mount code สำหรับ hot-reload
+      - ./code:/app/code
+      # Mount env file
+      - ./env.properties:/app/env.properties
+    environment:
+      - PYTHONPATH=/app/code
     env_file:
-      - ./env.properties 
+      - ./env.properties
     restart: unless-stopped
 
 networks:
-  import-fastapi-network:
+  default:
+    name: ai-operation-network

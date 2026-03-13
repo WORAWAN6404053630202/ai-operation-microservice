@@ -1,0 +1,48 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docker
+docker-compose*.yaml
+Dockerfile
+
+# Logs
+*.log
+logs/
+
+# Environment (จะ mount แทน)
+# env.properties
+
+# Sessions (runtime data)
+code/sessions/
+code/data/states/
+
+# Documentation
+README.md
+*.md
+
+# Deployment scripts
+deploy-ec2.sh
+quick-deploy.sh
+*.sh
+
+# macOS
+.DS_Store

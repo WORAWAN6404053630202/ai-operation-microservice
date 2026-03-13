@@ -1,21 +1,27 @@
+#/Users/w.worawan/Downloads/ai-operation-microservice3_v2ori/docker-compose.prod.yaml
 version: '3.9'
 
 services:
   serve:
-    container_name: ${CONTAINER_NAME}
-    image: ${DOCKER_REPO_USER}/${IMAGE_NAME}:${IMAGE_VERSION}
+    container_name: ai-operation-prod
+    image: ai-operation:prod
     platform: linux/amd64
     build:
       context: .
       target: prod
       dockerfile: ./Dockerfile
     ports:
-      - "${PORT}:3000"
+      - "3000:3000"
     volumes:
-      - ./code:/apps
+      # Production: ไม่ mount code (เพื่อความปลอดภัย)
+      # Mount เฉพาะ env file
+      - ./env.properties:/app/env.properties
+    environment:
+      - PYTHONPATH=/app/code
     env_file:
-      - ./env.properties 
+      - ./env.properties
     restart: unless-stopped
 
 networks:
-  import-fastapi-network:
+  default:
+    name: ai-operation-network

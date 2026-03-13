@@ -18,21 +18,21 @@ langchain-openai>=0.1.22
 openai>=1.40.0
 
 # --- Vector / RAG ---
-pymilvus>=2.4.4
+chromadb>=0.5.0
 sentence-transformers>=3.0.1,<4
 transformers>=4.41.0,<5.0.0
 huggingface-hub>=0.23.0,<1.0
 
-# --- Web UI ---
+# --- Data Processing ---
+pandas>=2.0.0
+
+# --- Web UI (optional) ---
 gradio>=6,<7
 gradio-client>=2,<3
+
+# --- Testing (optional) ---
+pytest>=7.4.0
 
 # --- Utilities ---
 requests>=2.31.0
 tqdm>=4.66.0
-pandas>=2.0.0
-
-# --- Testing (optional for dev) ---
-pytest>=7.4.0
-
-chromadb>=0.5.0
