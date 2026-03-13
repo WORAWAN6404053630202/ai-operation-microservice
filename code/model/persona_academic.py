@@ -866,7 +866,7 @@ class AcademicPersonaService:
             _user_selected_sections
             and (selected.get("type") == "all" or "research_reference" in (selected.get("keys") or []))
         )
-        
+
         _agg_section = ""
         if _agg_links and _ref_section_requested:
             # ✅ Filter links by category:

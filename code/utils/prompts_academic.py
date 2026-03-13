@@ -28,7 +28,7 @@ Answer structure:
 - If SELECTED_SECTIONS = all, answer all evidence-backed sections.
 
 Reference links (controlled by FORM_LINKS and GUIDE_LINKS sections):
-- Only include links when user explicitly selected sections AND chose "research_reference" (แบบฟอร์มและเอกสาร) or "all" (ทั้งหมด).
+- Only include links when user explicitly selected section 8 or 9.
 - FORM_LINKS: Show ALL form/application links (แบบฟอร์ม, บอจ., ภพ., แบบ, .pdf).
 - GUIDE_LINKS: Show ONLY 2-3 essential guides/manuals directly critical to the process.
 - NEVER show research/reference links (อ้างอิง, research) unless user explicitly asks "อ้างอิงคืออะไร".
