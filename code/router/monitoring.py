@@ -55,26 +55,25 @@ def _check_services() -> Dict[str, bool]:
     
     # Check ChromaDB
     try:
-        from code.service.local_vector_store import LocalVectorStore
-        store = LocalVectorStore()
-        # Quick check if we can access the collection
-        count = store._collection.count()
+        from service.local_vector_store import get_vs_manager
+        mgr = get_vs_manager()
+        count = mgr._collection_count() or 0
         checks['chromadb'] = count > 0
     except Exception as e:
         logger.warning(f"ChromaDB check failed: {e}")
         checks['chromadb'] = False
-    
+
     # Check OpenRouter API key
     try:
-        from code.conf import OPENROUTER_API_KEY
+        from conf import OPENROUTER_API_KEY
         checks['openrouter_key'] = bool(OPENROUTER_API_KEY)
     except Exception as e:
         logger.warning(f"OpenRouter key check failed: {e}")
         checks['openrouter_key'] = False
-    
+
     # Check session storage
     try:
-        from code.model.state_manager import StateManager
+        from model.state_manager import StateManager
         sm = StateManager()
         checks['session_storage'] = True
     except Exception as e:
@@ -207,12 +206,12 @@ async def list_sessions():
     List active sessions (debug endpoint)
     """
     try:
-        from code.model.state_manager import StateManager
+        from model.state_manager import StateManager
         sm = StateManager()
-        
+
         # Get all session files
         import glob
-        session_files = glob.glob(str(sm.sessions_dir / "s_*.json"))
+        session_files = glob.glob(str(sm.dir / "s_*.json"))
         
         sessions = []
         for file in session_files:

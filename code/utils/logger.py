@@ -102,6 +102,14 @@ class HumanReadableFormatter(logging.Formatter):
         
         message = " | ".join(parts)
         
+        # Add extra_data fields inline (human-readable)
+        if hasattr(record, 'extra_data') and isinstance(record.extra_data, dict):
+            skip = {'action', 'persona', 'total_docs', 'doc_index'}
+            extras = {k: v for k, v in record.extra_data.items() if k not in skip and v not in (None, '', [])}
+            if extras:
+                kv = '  '.join(f"{k}={v!r}" for k, v in extras.items())
+                message += f"\n                                                    ↳ {kv}"
+        
         # Add exception if present
         if record.exc_info:
             message += "\n" + "".join(traceback.format_exception(*record.exc_info))

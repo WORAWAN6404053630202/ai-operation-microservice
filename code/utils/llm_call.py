@@ -54,7 +54,7 @@ def _safe_log_with_data(log_obj: logging.Logger, level: str, message: str, paylo
 
 # Import structured logger
 try:
-    from code.utils.logger import get_logger
+    from utils.logger import get_logger
     logger = get_logger(__name__)
     _STRUCTURED_LOG = True
 except ImportError:
@@ -68,7 +68,7 @@ _TOKEN_WARN_THRESHOLD = 8_000  # warn when session total exceeds this
 
 # Import metrics if available
 try:
-    from code.utils.metrics import metrics
+    from utils.metrics import metrics
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
@@ -76,7 +76,7 @@ except ImportError:
 
 # Import config for budget thresholds
 try:
-    from code import conf
+    import conf
     _CONF_AVAILABLE = True
 except ImportError:
     _CONF_AVAILABLE = False
@@ -95,7 +95,7 @@ def _check_token_budget(total: int, model: str) -> None:
                 "threshold": conf.TOKEN_BUDGET_CRITICAL,
                 "model": model,
                 "severity": "critical",
-                "message": f"Token usage {total:,} exceeds CRITICAL threshold {conf.TOKEN_BUDGET_CRITICAL:,}!"
+                "detail": f"Token usage {total:,} exceeds CRITICAL threshold {conf.TOKEN_BUDGET_CRITICAL:,}!"
             }
         )
     elif total >= conf.TOKEN_BUDGET_WARNING:
@@ -107,7 +107,7 @@ def _check_token_budget(total: int, model: str) -> None:
                 "target": conf.TOKEN_BUDGET_PER_CALL,
                 "model": model,
                 "severity": "warning",
-                "message": f"Token usage {total:,} exceeds WARNING threshold. Target: {conf.TOKEN_BUDGET_PER_CALL:,}"
+                "detail": f"Token usage {total:,} exceeds WARNING threshold. Target: {conf.TOKEN_BUDGET_PER_CALL:,}"
             }
         )
     elif total >= _TOKEN_WARN_THRESHOLD:
@@ -138,6 +138,46 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> flo
     pricing = PRICING_USD_PER_MILLION_TOKENS.get(model, {"input": 0, "output": 0})
     cost = (prompt_tokens * pricing["input"] / 1_000_000) + (completion_tokens * pricing["output"] / 1_000_000)
     return cost
+
+
+def extract_llm_text(response: Any) -> str:
+    """
+    Extract the final text content from an LLM response.
+
+    Handles two formats:
+    - Normal models: response.content is a plain string
+    - Gemini 2.5 Flash (thinking mode): response.content is a list of blocks
+      e.g. [{"type": "thinking", "thinking": "..."}, {"type": "text", "text": "..."}]
+
+    Always returns a plain string (may be empty).
+    """
+    content = getattr(response, "content", None)
+
+    # Plain string — the common case
+    if isinstance(content, str):
+        return content
+
+    # Gemini thinking mode: content is a list of typed blocks
+    if isinstance(content, list):
+        # Prefer the first "text"-type block
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return str(block.get("text") or "")
+        # Fallback: first string element in the list
+        for block in content:
+            if isinstance(block, str):
+                return block
+        # Last resort: join all string values found
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                v = block.get("text") or block.get("content") or block.get("thinking") or ""
+                if v:
+                    parts.append(str(v))
+        return " ".join(parts)
+
+    # None or unknown — return empty string
+    return ""
 
 
 def llm_invoke(
@@ -184,7 +224,16 @@ def llm_invoke(
             last_exc = exc
             elapsed = time.perf_counter() - t0
             log.warning("[%s] exception: %s — %s", label, type(exc).__name__, str(exc)[:300])
-            
+
+            # BUG-G fix: LengthFinishReasonError means the model hit the token limit.
+            # Retrying with identical input always produces the same error — skip all retries.
+            if "LengthFinishReasonError" in type(exc).__name__ or "LengthFinishReason" in str(exc)[:80]:
+                log.warning(
+                    "[%s] LengthFinishReasonError — skip retries (token limit, same input = same result)",
+                    label,
+                )
+                raise
+
             # Record failed attempt in metrics
             if _METRICS_AVAILABLE:
                 metrics.record_llm_call(
@@ -197,7 +246,7 @@ def llm_invoke(
                     persona=persona,
                     operation=operation
                 )
-            
+
             if attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAYS[attempt]
                 log.warning(
@@ -310,12 +359,12 @@ def llm_invoke(
                         # ถ้า summarize ไม่ได้ ใช้ trim แทน
                         log.info("[%s] Summarization not needed, using trim instead", label)
                         if hasattr(state, "trim_messages"):
-                            state.trim_messages(keep_last=5)
+                            state.trim_messages(keep_last=8)
                 except Exception as e:
                     log.warning("[%s] Summarization failed: %s, falling back to trim", label, e)
                     # Fallback: trim ตามเดิม
                     if hasattr(state, "trim_messages"):
-                        state.trim_messages(keep_last=5)
+                        state.trim_messages(keep_last=8)
         except Exception:
             pass
 
@@ -366,7 +415,15 @@ async def llm_invoke_async(
             last_exc = exc
             elapsed = time.perf_counter() - t0
             log.warning("[%s] exception: %s — %s", label, type(exc).__name__, str(exc)[:300])
-            
+
+            # BUG-G fix: same as llm_invoke — skip retries for LengthFinishReasonError
+            if "LengthFinishReasonError" in type(exc).__name__ or "LengthFinishReason" in str(exc)[:80]:
+                log.warning(
+                    "[%s] LengthFinishReasonError — skip retries (token limit, same input = same result)",
+                    label,
+                )
+                raise
+
             # Record failed attempt in metrics
             if _METRICS_AVAILABLE:
                 metrics.record_llm_call(
@@ -379,7 +436,7 @@ async def llm_invoke_async(
                     persona=persona,
                     operation=operation
                 )
-            
+
             if attempt < _MAX_RETRIES:
                 delay = _RETRY_DELAYS[attempt]
                 log.warning(
@@ -483,11 +540,11 @@ async def llm_invoke_async(
                     else:
                         log.info("[%s] Summarization not needed, using trim instead", label)
                         if hasattr(state, "trim_messages"):
-                            state.trim_messages(keep_last=5)
+                            state.trim_messages(keep_last=8)
                 except Exception as e:
                     log.warning("[%s] Summarization failed: %s, falling back to trim", label, e)
                     if hasattr(state, "trim_messages"):
-                        state.trim_messages(keep_last=5)
+                        state.trim_messages(keep_last=8)
         except Exception:
             pass
 
