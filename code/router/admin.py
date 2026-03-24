@@ -22,6 +22,20 @@ _state_manager = StateManager()
 # Path to uvicorn log file (adjust if needed via env)
 _LOG_FILE = Path(os.getenv("LOG_FILE", str(Path(__file__).resolve().parent.parent.parent / "uvicorn.log")))
 
+# Pricing per million tokens (USD) — same as llm_call.py
+_PRICING = {
+    "anthropic/claude-sonnet-4-5":             {"input": 3.00,  "output": 15.00},
+    "anthropic/claude-sonnet-4":               {"input": 3.00,  "output": 15.00},
+    "anthropic/claude-haiku-4":                {"input": 0.25,  "output": 1.25},
+    "anthropic/claude-3.5-haiku-20241022":     {"input": 0.25,  "output": 1.25},
+    "openai/gpt-4o":                           {"input": 5.00,  "output": 15.00},
+    "qwen/qwen-2.5-72b-instruct":              {"input": 0.35,  "output": 0.40},
+}
+
+def _estimate_cost(prompt_tokens: int, completion_tokens: int, model: str = "") -> float:
+    p = _PRICING.get(model, {"input": 2.0, "output": 8.0})  # fallback average
+    return (prompt_tokens * p["input"] + completion_tokens * p["output"]) / 1_000_000
+
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def admin_dashboard():
@@ -45,6 +59,11 @@ async def admin_sessions(limit: int = Query(default=50, le=200)):
         user_msgs = [m for m in messages if m.get("role") == "user"]
         bot_msgs  = [m for m in messages if m.get("role") == "assistant"]
 
+        prompt_tokens     = getattr(state, "total_prompt_tokens", 0) or 0
+        completion_tokens = getattr(state, "total_completion_tokens", 0) or 0
+        total_tokens      = prompt_tokens + completion_tokens
+        cost_usd          = _estimate_cost(prompt_tokens, completion_tokens)
+
         result.append({
             "session_id": sid,
             "persona_id": s.get("persona_id", "practical"),
@@ -53,6 +72,10 @@ async def admin_sessions(limit: int = Query(default=50, le=200)):
             "total_messages": len(messages),
             "user_messages": len(user_msgs),
             "bot_messages": len(bot_msgs),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "cost_usd": round(cost_usd, 6),
         })
 
     return JSONResponse({"sessions": result, "total": len(result)})
@@ -68,6 +91,9 @@ async def admin_session_detail(session_id: str):
     messages = state.messages or []
     context  = state.context or {}
 
+    prompt_tokens     = getattr(state, "total_prompt_tokens", 0) or 0
+    completion_tokens = getattr(state, "total_completion_tokens", 0) or 0
+
     return JSONResponse({
         "session_id": session_id,
         "persona_id": state.persona_id,
@@ -76,6 +102,10 @@ async def admin_session_detail(session_id: str):
         "last_topic": context.get("last_topic", ""),
         "fsm_state": context.get("fsm_state", ""),
         "total_messages": len(messages),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "cost_usd": round(_estimate_cost(prompt_tokens, completion_tokens), 6),
     })
 
 

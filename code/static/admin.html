@@ -242,8 +242,9 @@
   <div class="stat-item"><div class="stat-label">Sessions ทั้งหมด</div><div class="stat-value" id="statTotal">—</div></div>
   <div class="stat-item"><div class="stat-label">วันนี้</div><div class="stat-value" id="statToday">—</div></div>
   <div class="stat-item"><div class="stat-label">สัปดาห์นี้</div><div class="stat-value" id="statWeek">—</div></div>
+  <div class="stat-item"><div class="stat-label">Tokens รวมทุก session</div><div class="stat-value" id="statTokens">—</div></div>
+  <div class="stat-item"><div class="stat-label">ค่าใช้จ่ายรวม (USD)</div><div class="stat-value" id="statCost">—</div></div>
   <div class="stat-item"><div class="stat-label">Cache hit rate</div><div class="stat-value" id="statCache">—</div></div>
-  <div class="stat-item"><div class="stat-label">Cache hits</div><div class="stat-value" id="statHits">—</div></div>
 </div>
 
 <div class="layout">
@@ -314,7 +315,15 @@
     document.getElementById("statWeek").textContent  = d.sessions?.this_week ?? "—";
     const hr = d.cache?.hit_rate;
     document.getElementById("statCache").textContent = hr != null ? (hr * 100).toFixed(0) + "%" : "—";
-    document.getElementById("statHits").textContent  = d.cache?.hits ?? "—";
+  }
+
+  function updateTokenStats(sessions) {
+    const totalTokens = sessions.reduce((s, x) => s + (x.total_tokens || 0), 0);
+    const totalCost   = sessions.reduce((s, x) => s + (x.cost_usd || 0), 0);
+    document.getElementById("statTokens").textContent =
+      totalTokens > 0 ? totalTokens.toLocaleString() : "0";
+    document.getElementById("statCost").textContent =
+      totalCost > 0 ? "$" + totalCost.toFixed(4) : "$0.0000";
   }
 
   // ── Sessions ──────────────────────────────────────────────────
@@ -322,6 +331,7 @@
     const d = await apiGet("/admin/api/sessions?limit=100");
     allSessions = d.sessions || [];
     document.getElementById("sessionCount").textContent = allSessions.length;
+    updateTokenStats(allSessions);
     renderSessionList();
   }
 
@@ -339,6 +349,8 @@
         <div class="s-meta">
           <span class="badge ${escHtml(s.persona_id)}">${escHtml(s.persona_id)}</span>
           <span>💬 ${s.user_messages}/${s.total_messages}</span>
+          <span>🔢 ${(s.total_tokens || 0).toLocaleString()} tokens</span>
+          <span>💵 $${(s.cost_usd || 0).toFixed(4)}</span>
           <span>${fmt(s.updated_at)}</span>
         </div>
       </div>
@@ -371,11 +383,15 @@
     // Context tab
     const slots = d.collected_slots || {};
     const rows = [
-      ["session_id",    d.session_id],
-      ["persona",       d.persona_id],
-      ["fsm_state",     d.fsm_state || "—"],
-      ["last_topic",    d.last_topic || "—"],
-      ["total_messages",d.total_messages],
+      ["session_id",         d.session_id],
+      ["persona",            d.persona_id],
+      ["fsm_state",          d.fsm_state || "—"],
+      ["last_topic",         d.last_topic || "—"],
+      ["total_messages",     d.total_messages],
+      ["prompt_tokens",      (d.prompt_tokens || 0).toLocaleString()],
+      ["completion_tokens",  (d.completion_tokens || 0).toLocaleString()],
+      ["total_tokens",       (d.total_tokens || 0).toLocaleString()],
+      ["cost_usd",           "$" + (d.cost_usd || 0).toFixed(6)],
       ...Object.entries(slots).map(([k, v]) => [`slot: ${k}`, v]),
     ];
 
