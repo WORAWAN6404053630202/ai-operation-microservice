@@ -261,9 +261,10 @@ async def chat(request: ChatRequest):
         saved = state_manager.load(session_id)
         state = saved if saved else ConversationState(session_id=session_id, persona_id="practical", context={})
         
-        # Check cache first
+        # Check cache first — skip if pending_slot (stateful slot-filling)
         cache = get_cache()
-        cached_result = cache.get(session_id, request.message, state.persona_id)
+        has_pending_slot = bool((state.context or {}).get("pending_slot"))
+        cached_result = None if has_pending_slot else cache.get(session_id, request.message, state.persona_id)
         
         if cached_result is not None:
             logger.info(f"[{session_id}] 🎯 Cache HIT! Skipping LLM call (saved ${cached_result.get('cost', 0):.3f})")
@@ -336,9 +337,10 @@ async def _stream_reply(session_id: str, message: str) -> AsyncGenerator[str, No
             session_id=session_id, persona_id="practical", context={}
         )
 
-        # ตรวจ cache ก่อน
+        # ตรวจ cache ก่อน — ข้าม cache ถ้ามี pending_slot (stateful slot-filling)
         cache = get_cache()
-        cached_result = cache.get(session_id, message, state.persona_id)
+        has_pending_slot = bool((state.context or {}).get("pending_slot"))
+        cached_result = None if has_pending_slot else cache.get(session_id, message, state.persona_id)
 
         if cached_result is not None:
             # Cache hit → stream ตัวอักษรจาก cache ทีละ chunk เพื่อให้ดูเหมือน typewriter

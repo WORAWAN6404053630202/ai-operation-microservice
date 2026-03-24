@@ -93,3 +93,8 @@ async def serve_index():
     html.headers["Pragma"] = "no-cache"
     html.headers["Expires"] = "0"
     return html
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=3000, reload=True)
