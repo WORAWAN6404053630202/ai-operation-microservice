@@ -1310,6 +1310,27 @@ class PersonaSupervisor:
         # state.get_last_retrieval_query() reads this field first, so no context mirror needed.
         state.last_retrieval_query = q
 
+    # Informational question patterns — user wants to KNOW something, not DO something.
+    # When matched (and no action pattern), skip slot queue and let LLM answer directly.
+    _INFO_Q_RE = re.compile(
+        r"(ประเภทใด|ประเภทไหน|อะไรบ้าง|คืออะไร|หมายถึงอะไร|"
+        r"ใครบ้าง|เงื่อนไข|ข้อยกเว้น|ยกเว้น|ไม่ต้อง|ไม่จำเป็น|"
+        r"ต้อง.{0,15}(ไหม|มั้ย|หรือเปล่า|หรือไม่)|"
+        r"แตกต่าง|เปรียบเทียบ|อธิบาย|กรณีใด|เมื่อไหร่|เมื่อไร|"
+        r"จะเกิดอะไร|เกิดอะไร|จะเป็นอะไร|จะเกิดผล|"
+        r"ต้องโดน|จะถูก|จะมีผล|บทลงโทษ|โทษคือ|ค่าปรับ)",
+        re.IGNORECASE,
+    )
+    # Action patterns — user wants to perform a registration/application step.
+    # Overrides _INFO_Q_RE: even if query looks informational, treat as action.
+    _ACTION_Q_RE = re.compile(
+        r"(อยากจด|อยากสมัคร|อยากขอ|อยากยื่น|"
+        r"ต้องการจด|ต้องการสมัคร|ต้องการขอ|ต้องการยื่น|"
+        r"จะจด|จะสมัคร|จะขอใบ|จะยื่น|"
+        r"วิธีจด|วิธีสมัคร|ขั้นตอนการจด|ขั้นตอนการสมัคร|ขั้นตอนการขอ)",
+        re.IGNORECASE,
+    )
+
     def _maybe_build_slot_queue_from_docs(self, state: ConversationState, query: str) -> None:
         """
         After doc retrieval for a direct legal question, discover slot dimensions for the
@@ -1323,6 +1344,12 @@ class PersonaSupervisor:
         # Multi-topic: docs span multiple licenses intentionally — skip slot queue, let LLM answer all
         if (state.context or {}).get("_multi_topic_retrieval"):
             _LOG.info("[Supervisor] multi-topic retrieval flag set — skipping slot queue build")
+            return
+
+        # Intent check: informational questions should be answered directly — no slot queue needed.
+        # Action signals override: "อยากจด/วิธีจด" always builds slot queue regardless.
+        if self._INFO_Q_RE.search(query) and not self._ACTION_Q_RE.search(query):
+            _LOG.info("[Supervisor] informational query — skipping slot queue: %r", query[:60])
             return
 
         # Extract all distinct license_types from retrieved docs
@@ -1736,6 +1763,16 @@ class PersonaSupervisor:
             _LOG.info(
                 "[Supervisor] pending_slot(%r) skipped — input looks like new legal question: %r",
                 pending_key, (user_input or "")[:50],
+            )
+            return False
+
+        # Special case: "topic" slot accepts legal phrases as menu selections, BUT a full
+        # question sentence (informational/consequential question) should bypass the menu
+        # and be handled as a new question. User can still pick from menu on next turn.
+        if pending_key == "topic" and self._INFO_Q_RE.search(user_input):
+            _LOG.info(
+                "[Supervisor] topic slot skipped — full question bypasses menu: %r",
+                (user_input or "")[:60],
             )
             return False
 
@@ -4065,12 +4102,21 @@ class PersonaSupervisor:
                 state.context.pop("pending_slot", None)
                 state.context.pop("topic_slot_queue", None)
             elif isinstance(_int_ps, dict) and _int_ps.get("key") in _INTERRUPT_EXEMPT:
-                # These slots must be answered first — route back to slot handler
-                _LOG.info(
-                    "[Supervisor] 2.9 legal interrupt SKIPPED — pending_slot(%r) is exempt, routing as slot reply",
-                    _int_ps.get("key"),
-                )
-                return self._route_pending_slot_to_persona(state, raw_stripped)
+                # "topic" slot is normally exempt, BUT a full informational question
+                # should bypass the menu and be answered directly (same logic as _should_route_pending_slot_now).
+                if _int_ps.get("key") == "topic" and self._INFO_Q_RE.search(raw_stripped):
+                    _LOG.info(
+                        "[Supervisor] 2.9 topic slot: informational question bypasses menu: %r",
+                        raw_stripped[:60],
+                    )
+                    # fall through to legal question handler below
+                else:
+                    # These slots must be answered first — route back to slot handler
+                    _LOG.info(
+                        "[Supervisor] 2.9 legal interrupt SKIPPED — pending_slot(%r) is exempt, routing as slot reply",
+                        _int_ps.get("key"),
+                    )
+                    return self._route_pending_slot_to_persona(state, raw_stripped)
 
             pid = normalize_persona_id(state.persona_id)
             if pid == "academic":
