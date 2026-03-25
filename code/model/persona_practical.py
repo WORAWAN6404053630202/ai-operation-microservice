@@ -1697,32 +1697,30 @@ class PracticalPersonaService:
         else:
             _docs_to_process = _all_docs[:_prompt_max_docs]
 
-        # Pass 1: collect research_reference links per license_type (deduped within each license)
-        _rr_seen_by_lt: dict = {}   # lt → set of seen keys
-        _rr_parts_by_lt: dict = {}  # lt → list of link lines
+        # Pass 1: classify research_reference links (globally deduped) → SERVICE_LINKS + FORM_LINKS
+        # Same _classify_link logic as Academic — no URL pattern rules needed in the prompt
+        _link_service: list = []  # (desc, url) registration/portal links
+        _link_form: list = []     # (desc, url) fillable form links
+        _link_seen: set = set()   # global dedup key
         for _d1 in _docs_to_process:
-            _lt1 = ((_d1.get("metadata") or {}).get("license_type") or "").strip()
             _rr_raw = str((_d1.get("metadata") or {}).get("research_reference") or "").strip()
             if not _rr_raw or _rr_raw in ("nan", "None"):
                 continue
-            _rr_filtered = _filter_research_links(_rr_raw)
-            if not _rr_filtered:
-                continue
-            if _lt1 not in _rr_seen_by_lt:
-                _rr_seen_by_lt[_lt1] = set()
-                _rr_parts_by_lt[_lt1] = []
-            for _desc1, _url1 in _parse_link_entries(_rr_filtered):
+            for _desc1, _url1 in _parse_link_entries(_rr_raw):
                 _key1 = (_url1 or _desc1).strip()
-                if _key1 and _key1 not in _rr_seen_by_lt[_lt1]:
-                    _rr_seen_by_lt[_lt1].add(_key1)
-                    if _desc1: _rr_parts_by_lt[_lt1].append(_desc1)
-                    if _url1:  _rr_parts_by_lt[_lt1].append(_url1)
-        _rr_agg_cap = _FIELD_CAPS.get("research_reference", 3100)
-        _rr_agg_by_lt = {lt: "\n".join(parts)[:_rr_agg_cap] for lt, parts in _rr_parts_by_lt.items()}
+                if not _key1 or _key1 in _link_seen:
+                    continue
+                _link_seen.add(_key1)
+                _cat1 = _classify_link(_desc1, _url1)
+                if _cat1 == "registration":
+                    _link_service.append((_desc1, _url1))
+                elif _cat1 == "form":
+                    _link_form.append((_desc1, _url1))
+                # guide → dropped in practical, ref → dropped in practical
 
-        # Pass 2: build docs_json with per-license dedup for long fields and research_reference
+        # Pass 2: build docs_json with per-license dedup for long fields
+        # research_reference is now injected as labeled sections outside docs_json
         _long_fields_sent_by_lt: dict = {}  # lt → bool
-        _rr_injected_by_lt: set = set()
         docs_json = []
         for d in _docs_to_process:
             md = d.get("metadata", {}) or {}
@@ -1736,7 +1734,7 @@ class PracticalPersonaService:
                 # Per-license dedup: skip long fields already sent for this license_type
                 if k in _LONG_FIELDS_DEDUP and _long_fields_sent_by_lt.get(_lt2):
                     continue
-                # research_reference injected below as aggregated version
+                # research_reference injected as labeled sections below — skip from per-doc metadata
                 if k == "research_reference":
                     continue
                 v_str = str(v)
@@ -1746,16 +1744,26 @@ class PracticalPersonaService:
                 filtered_md[k] = v_str
             if any(k in filtered_md for k in _LONG_FIELDS_DEDUP):
                 _long_fields_sent_by_lt[_lt2] = True
-            # Inject per-license aggregated research_reference into first doc of each license
-            if _lt2 not in _rr_injected_by_lt and _rr_agg_by_lt.get(_lt2):
-                filtered_md["research_reference"] = _rr_agg_by_lt[_lt2]
-                _rr_injected_by_lt.add(_lt2)
             docs_json.append(
                 {
                     "metadata": filtered_md,
                     "content": (d.get("content", "") or ""),
                 }
             )
+
+        # Build labeled link sections — LLM copies these directly, no URL pattern matching needed
+        def _fmt_prac_link(desc: str, url: str) -> str:
+            if desc and url:
+                return f"- {desc}\n  {url}"
+            return f"- {url or desc}"
+
+        _link_section = ""
+        if _link_service:
+            _link_section += "\n🌐 SERVICE_LINKS — copy เหล่านี้ตรงๆ under section '🌐 เว็บลงทะเบียน':\n"
+            _link_section += "\n".join(_fmt_prac_link(d, u) for d, u in _link_service) + "\n"
+        if _link_form:
+            _link_section += "\n📄 FORM_LINKS — copy เหล่านี้ตรงๆ under section '📄 แบบฟอร์ม':\n"
+            _link_section += "\n".join(_fmt_prac_link(d, u) for d, u in _link_form) + "\n"
 
         self._debug_log("pre_llm", query=user_text, docs_json=docs_json)
 
@@ -1837,7 +1845,7 @@ CONTEXT:
 
 DOCUMENTS ({len(docs_json)} found):
 {json.dumps(docs_json, ensure_ascii=False)}
-
+{_link_section}
 ROUND: {int(getattr(state, "round", 0) or 0)}/{int(getattr(conf, "MAX_ROUNDS", 7) or 7)}{_topic_hint}{_multi_license_instruction}
 
 Your JSON response:
