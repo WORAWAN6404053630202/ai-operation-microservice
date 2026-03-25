@@ -48,6 +48,7 @@ def _classify_link(desc: str, url: str) -> str:
         "efiling.rd.go.th", "elc.excise.go.th",
         "reserve.dbd.go.th", "sso.go.th/wpr/main/service",
         "foodhandler.anamai", "e-service.doe.go.th",
+        "docs.google.com/forms",  # Google Forms = online registration/application form
     )
     if ".pdf" not in url_l and any(kw in url_l for kw in _REG_URL_KW):
         return "registration"
