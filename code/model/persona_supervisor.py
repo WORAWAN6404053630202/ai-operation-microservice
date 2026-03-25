@@ -1932,10 +1932,21 @@ class PersonaSupervisor:
                 if dept and dept not in ("nan", "None"):
                     dept_opts.add(dept)
             if len(dept_opts) >= 2:
+                # Build a generic question that fits any department type (bank, govt office, etc.)
+                # Avoid hardcoding "ธนาคาร" which only fits QR Payment context.
+                _all_dept_are_banks = all(
+                    any(kw in d for kw in ("ธนาคาร", "Bank", "bank"))
+                    for d in dept_opts
+                )
+                _dept_question = (
+                    "ต้องการสมัครกับธนาคารใดครับ?"
+                    if _all_dept_are_banks
+                    else "ร้านของคุณยื่นขอที่หน่วยงานใดครับ?"
+                )
                 slots.append({
                     "key": "department",
                     "options": sorted(dept_opts),
-                    "question": "ต้องการสมัครกับธนาคาร/หน่วยงานใดครับ?",
+                    "question": _dept_question,
                 })
                 seen_keys.add("department")
                 _LOG.info("[Supervisor] discover_slots[%r]: department → %s", license_type, sorted(dept_opts))
