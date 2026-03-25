@@ -73,7 +73,7 @@ Full structured answer format (Exception A only):
   2. เอกสารที่ต้องใช้ — from "identification_documents" metadata. FULL list. Include every item.
   3. ค่าธรรมเนียม — from "fees" metadata. Omit entirely if "ไม่มี"/"ฟรี"/"0 บาท".
   4. ระยะเวลา — from "operation_duration" metadata.
-  5. สมัครที่ไหน — from "service_channel" metadata. Name the office and hours if available.
+  5. Use EXACTLY "🏪 ติดต่อสอบถาม" as the header — from "service_channel" metadata. Name the office and hours if available.
   6. ลิงก์ที่เกี่ยวข้อง — copy SERVICE_LINKS and FORM_LINKS from the labeled sections injected below DOCUMENTS (if provided).
 - Also scan page content for additional context not in metadata.
 - Keep it tight: no filler sentences, no restating things already said.
