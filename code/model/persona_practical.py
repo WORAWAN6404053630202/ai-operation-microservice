@@ -22,72 +22,64 @@ logger = get_logger(__name__)  # ใช้ logger ใหม่ (มี structure
 _LLM_HIDDEN_METADATA_KEYS = frozenset({"row_id", "source"})
 
 
-def _classify_link(desc: str, url: str) -> str:
+def _classify_link(desc: str, url: str) -> str:  # noqa: ARG001 — url intentionally unused
     """
-    Classify a (description, url) pair into one of 4 categories:
-      'registration' — เว็บลงทะเบียน/ยื่นออนไลน์ (type 4: show in BOTH bots always)
-      'form'         — แบบฟอร์ม/เอกสาร/แบบ        (type 1: show in BOTH bots)
-      'guide'        — คู่มือ/youtube/สอน/วิธีการ   (type 2: academic only, max 1 link)
-      'ref'          — อ้างอิงทั่วไป/FAQ/กฎหมาย    (type 3: show only when user asks)
+    Classify a link based on desc ONLY — url is ignored.
 
-    Priority order (first match wins):
-      1. registration (URL-based service portal keywords)
-      2. form (PDF with form-desc, OR form keyword in desc)
-      3. guide (PDF with guide-desc, OR guide/video URL/keywords in desc)
-      4. ref (fallback)
+    Categories:
+      'guide'        — คู่มือ, วิดีโอ, workflow, ขั้นตอนการ
+      'form'         — แบบฟอร์ม, เอกสาร, ดาวน์โหลด, แบบ บอจ, คำขอ etc.
+      'registration' — ลงทะเบียนออนไลน์, e-service, สมัครบริการ, mobile app
+      'ref'          — fallback (กฎหมาย, FAQ, หน้าข้อมูลทั่วไป)
+
+    Priority order (first match wins): guide → form → registration → ref
     """
-    url_l  = url.lower()
-    desc_l = desc.lower()
+    desc_l = desc.lower().strip()
 
-    # ── Type 4: Registration/service portals ──────────────────────────────────
-    # Check URL first (most reliable) — covers all known online filing systems
-    # But skip if URL is a PDF — PDFs are always form or guide even if hosted on portal domain
-    _REG_URL_KW = (
-        "eservice.", "e-service.", "bmaoss.", "edbr.dbd", ".webportal.",
-        "webportal.bangkok", "info.go.th/procedure",
-        "efiling.rd.go.th", "elc.excise.go.th",
-        "reserve.dbd.go.th", "sso.go.th/wpr/main/service",
-        "foodhandler.anamai", "e-service.doe.go.th",
-        "docs.google.com/forms",  # Google Forms = online registration/application form
+    # ── Guide: manual, video, workflow, how-to ────────────────────────────────
+    _GUIDE_KW = (
+        "คู่มือ",
+        "youtube", "youtu.be", "vdo ", " vdo",
+        "facebook",
+        "workflow",
+        "ขั้นตอนการ",
+        "ความรู้เรื่อง",
+        "วิธีการ", "วิธีใช้", "การสอน",
+        "tutorial", "guide",
+        "info",
     )
-    if ".pdf" not in url_l and any(kw in url_l for kw in _REG_URL_KW):
-        return "registration"
-    # Also catch "ยื่นออนไลน์" or "สำหรับลงทะเบียน" in desc when URL is a non-PDF site
-    if ".pdf" not in url_l:
-        if any(kw in desc_l for kw in ("ยื่นออนไลน์", "สำหรับลงทะเบียน", "ยื่นจดทะเบียน")):
-            return "registration"
-
-    # ── Type 1: Forms/documents ────────────────────────────────────────────────
-    # PDF whose desc signals it's a downloadable form (not a guide/law/reference)
-    _FORM_DESC_KW = ("แบบฟอร์ม", "แบบ ", "เอกสาร", "บอจ", "ภพ", "ภส.", "ภป.",
-                     "อส.", "สปส.", "สณ.", "ดาวน์โหลดเอกสาร", "แบบคำขอ",
-                     "แบบแจ้ง", "แบบแสดง", "แบบประเมิน", "ใบสมัคร")
-    _GUIDE_DESC_KW = ("คู่มือ", "guide", "manual", "วิธีการ", "วิธีใช้",
-                      "ขั้นตอนการ", "การสอน", "สอน", "tutorial")
-    if ".pdf" in url_l:
-        # FAQ PDFs are reference, not forms
-        if any(kw in desc_l for kw in ("faq", "คำถามที่พบบ่อย", "ถาม-ตอบ", "โทษ", "บทลงโทษ",
-                                        "พระราชบัญญัติ", "พ.ร.บ.", "กฎกระทรวง", "กฎหมาย")):
-            return "ref"
-        is_guide_pdf = (any(kw in desc_l for kw in _GUIDE_DESC_KW)
-                        and not any(kw in desc_l for kw in ("แบบ ", "แบบฟอร์ม", "บอจ", "ภพ", "เอกสาร")))
-        return "guide" if is_guide_pdf else "form"
-
-    # ── Type 2: Guides/tutorials ────────────────────────────────────────────────
-    _GUIDE_URL_KW = ("youtube", "youtu.be", "drive.google.com", "facebook.com",
-                     "fb.me", "canva.com", "lin.ee", "line.me")
-    # Guide desc check runs BEFORE form check for non-PDF:
-    # "คู่มือการกรอกเอกสาร..." has both guide + form keywords — guide wins
-    if any(kw in desc_l for kw in _GUIDE_DESC_KW):
-        return "guide"
-    if any(kw in url_l for kw in _GUIDE_URL_KW):
+    if any(kw in desc_l for kw in _GUIDE_KW):
         return "guide"
 
-    # Non-PDF: form keywords in desc
-    if any(kw in desc_l for kw in _FORM_DESC_KW):
+    # ── Form: downloadable forms and documents ────────────────────────────────
+    _FORM_KW = (
+        "แบบฟอร์ม",
+        "แบบ บอจ", "แบบ ก.", "แบบ ว.", "แบบ สปส", "แบบ สณ",
+        "แบบ ภพ", "แบบ ภส", "แบบ อส", "แบบ บค", "แบบ รส",
+        "ดาวน์โหลดเอกสาร", "ดาวน์โหลดแบบฟอร์ม", "ดาวน์โหลด",
+        "เอกสาร",
+        "แบบคำขอ", "แบบแจ้ง", "แบบแสดง", "แบบคำรับรอง",
+        "คำขอจดทะเบียน", "คำขอใช้บริการ", "คำขอ",
+        "ตัวอย่างการกรอก", "ตัวอย่างการจดทะเบียน", "ตัวอย่าง",
+        "ใบสมัคร",
+        "หนังสือมอบอำนาจ", "หนังสือยินยอม", "หนังสือให้ความยินยอม",
+        "บัญชีรายชื่อผู้ถือหุ้น",
+    )
+    if any(kw in desc_l for kw in _FORM_KW):
         return "form"
 
-    # ── Type 3: Reference (fallback) ───────────────────────────────────────────
+    # ── Registration: online portals and apps for applying ────────────────────
+    _REG_KW = (
+        "สำหรับลงทะเบียน", "ลงทะเบียนออนไลน์",
+        "ยื่นออนไลน์", "ยื่นจดทะเบียนออนไลน์",
+        "e-service", "e service", "eservice",
+        "สมัครบริการ", "สมัครสมาชิก",
+        "mobile application", "app store", "play store",
+    )
+    if any(kw in desc_l for kw in _REG_KW):
+        return "registration"
+
+    # ── Ref: fallback (laws, FAQ, general info pages) ─────────────────────────
     return "ref"
 
 
@@ -157,28 +149,6 @@ def _parse_link_entries(text: str) -> list:
     return clean
 
 
-def _filter_research_links(text: str) -> str:
-    """
-    Filter research_reference for practical bot:
-      - Type 4 (registration portals) → KEEP (always show)
-      - Type 1 (forms/documents)      → KEEP (always show)
-      - Type 2 (guides/tutorials)     → DROP (academic only)
-      - Type 3 (reference/FAQ/law)    → DROP (show only on user request)
-    Returns filtered text with registration links first, then form links.
-    """
-    entries = _parse_link_entries(text)
-    reg_parts: list = []
-    form_parts: list = []
-    for desc, url in entries:
-        cat = _classify_link(desc, url)
-        if cat == "registration":
-            if desc: reg_parts.append(desc)
-            if url:  reg_parts.append(url)
-        elif cat == "form":
-            if desc: form_parts.append(desc)
-            if url:  form_parts.append(url)
-        # guide → dropped, ref → dropped
-    return "\n".join(reg_parts + form_parts)
 
 # 🎯 Token: Whitelist — ส่ง metadata keys ที่ LLM ต้องการโดยตรง
 # content ถูกตัดที่ LLM_DOC_CHARS_PRACTICAL (400 chars) ดังนั้น fields สำคัญต้องอยู่ใน metadata

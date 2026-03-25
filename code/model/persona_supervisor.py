@@ -193,6 +193,11 @@ class PersonaSupervisor:
         r"(ทำอะไรอยู่|ทำไรอยู่|ว่างไหม|อยู่ไหม|เป็นไงบ้าง|เป็นไง|กินข้าวยัง|สบายดีไหม|สบายดีปะ|โอเคไหม|เหนื่อยไหม)",
         re.IGNORECASE,
     )
+    # Personal questions directed AT the bot (greeting context but off-domain)
+    _PERSONAL_Q_RE = re.compile(
+        r"คุณ(จะ|ชอบ|ไป|มี|รู้สึก|เคย|อยาก|คิด|รู้|เป็น|ทำ|กิน|ดู|ฟัง|เล่น|พูด|บอก|แนะนำ|โปรด)",
+        re.IGNORECASE,
+    )
     _THANKS_RE = re.compile(r"(ขอบคุณ|ขอบใจ|thx|thanks)\b", re.IGNORECASE)
 
     _LIKELY_SELECTION_RE = re.compile(r"^\s*[\d\s,/-]+\s*$")
@@ -348,6 +353,48 @@ class PersonaSupervisor:
             return
         state.messages.append({"role": "assistant", "content": text})
         _LOG.debug("[Supervisor] assistant_msg_len=%d", len(text))
+
+    def _handle_deflect(self, state: ConversationState, raw_input: str) -> Tuple[ConversationState, str]:
+        """
+        Guardrail deflection — LLM-guided response for off-topic / personal questions.
+        Used by: 2.2c early-off-topic, greeting+personal-question, unknown_intent.
+        """
+        _LOG.info("[Supervisor] deflect input=%r", (raw_input or "")[:60])
+        try:
+            _llm = ChatOpenAI(
+                model=getattr(conf, "OPENROUTER_SWITCH_MODEL", conf.OPENROUTER_MODEL),
+                openai_api_key=conf.OPENROUTER_API_KEY,
+                openai_api_base=conf.OPENROUTER_BASE_URL,
+                temperature=0.7,
+                max_tokens=200,
+                request_timeout=int(getattr(conf, "LLM_REQUEST_TIMEOUT", 30)),
+            )
+            _prompt = (
+                "คุณคือ 'น้องสุดยอด' — AI พี่ที่รู้จริงเรื่องกฎหมายธุรกิจร้านอาหารไทย\n"
+                "พูดเป็นกันเอง สนุก ตรงไปตรงมา ไม่เป็นทางการ ไม่แข็งทื่อ\n\n"
+                "ผู้ใช้พูดเรื่องนอก scope ของคุณ:\n"
+                f"\"{raw_input}\"\n\n"
+                "กฎเด็ดขาด (ละเมิดไม่ได้):\n"
+                "- ตอบเป็น plain text บรรทัดเดียวเท่านั้น ห้ามมี \\n หรือขึ้นบรรทัดใหม่เด็ดขาด\n"
+                "- เขียนไม่เกิน 40 คำ — จบประโยคให้สมบูรณ์ก่อนหยุด\n"
+                "- ห้ามเริ่มด้วย 'สวัสดี' หรือ 'ขอบคุณที่...'\n"
+                "- ใช้ 'ผม' ลงท้าย 'ครับ'\n"
+                "- ห้ามบอกว่าตัวเองมีความรู้สึก ชอบ หรือประสบการณ์ส่วนตัว\n\n"
+                "วิธีตอบ:\n"
+                "- รับ vibe สั้นๆ แล้ว redirect ทันทีว่าช่วยได้เรื่องอะไร (ใบอนุญาต/ภาษี/กฎหมายร้านอาหาร)\n"
+            )
+            _reply = extract_llm_text(
+                llm_invoke(_llm, [HumanMessage(content=_prompt)], logger=_LOG, label="Supervisor/deflect")
+            ).strip()
+            # Hard-enforce single line — collapse any newlines the LLM sneaks in
+            _reply = " ".join(_reply.splitlines()).strip()
+        except Exception as _e:
+            _LOG.warning("[Supervisor] deflect LLM failed: %s", _e)
+            _reply = "ผมช่วยเรื่องกฎหมายและใบอนุญาตธุรกิจร้านอาหารครับ มีอะไรอยากถามไหมครับ? 😊"
+        _reply = self._normalize_male(_reply)
+        self._add_assistant(state, _reply)
+        state.last_action = "unknown_deflect"
+        return state, _reply
 
     def _normalize_for_intent(self, s: str) -> str:
         t = (s or "").strip().lower()
@@ -1786,6 +1833,17 @@ class PersonaSupervisor:
                 (user_input or "")[:60],
             )
             return False
+
+        # topic slot: require a number OR at least one legal/business keyword.
+        # Fully off-topic inputs (e.g. "กินข้าวกับอะไรดี") have neither → bypass slot
+        # and fall through to normal routing (→ unknown intent → deflect).
+        if pending_key == "topic":
+            if not self._LIKELY_SELECTION_RE.match(user_input) and not self._LEGAL_SIGNAL_RE.search(user_input):
+                _LOG.info(
+                    "[Supervisor] topic slot skipped — no legal signal or number in off-topic input: %r",
+                    (user_input or "")[:60],
+                )
+                return False
 
         return self._looks_like_pending_slot_reply(user_input)
 
@@ -3724,10 +3782,28 @@ class PersonaSupervisor:
         _LOG.info("[Supervisor] typo_prompt input=%r suggested=%r", (user_input or "")[:40], suggested or "")
         return state, msg
 
-    def _handle_greeting(self, state: ConversationState, user_input: str) -> Tuple[ConversationState, str]:
+    def _handle_greeting(self, state: ConversationState, user_input: str, show_menu: bool = True) -> Tuple[ConversationState, str]:
         state.context = state.context or {}
         raw = (user_input or "").strip()
         t = self._normalize_for_intent(raw)
+
+        # Guardrail: greeting mixed with off-topic content → deflect, not topic menu
+        # e.g. "สวัสดี ไปเที่ยวระยองกันมั้ย", "สวัสดี คุณจะไปสวัสดีใคร"
+        # Strip greeting prefix → if remainder is non-empty and off-topic → deflect
+        if raw:
+            _greet_prefix_re = re.compile(
+                r"^(สวัสดี\w*|หวัดดี|ดีครับ|ดีค่ะ|ดีจ้า|ดีนะ|hi\b|hello\b)\s*[,!]?\s*",
+                re.IGNORECASE,
+            )
+            _remainder = _greet_prefix_re.sub("", raw).strip()
+            if (
+                _remainder
+                and not self._LEGAL_SIGNAL_RE.search(_remainder)
+                and not self._looks_like_legal_question(_remainder)
+                and not self._LIKELY_SELECTION_RE.match(_remainder)
+            ):
+                _LOG.info("[Supervisor] greeting+offtopic → deflect remainder=%r", _remainder[:60])
+                return self._handle_deflect(state, raw)
 
         kind = "greet"
         if not raw:
@@ -3737,6 +3813,19 @@ class PersonaSupervisor:
         elif self._SMALLTALK_RE.search(raw) or self._TH_LAUGH_5_RE.match(raw):
             kind = "smalltalk"
 
+        # Short reply path: no topic list, no pending_slot update
+        if not show_menu:
+            if kind == "thanks":
+                msg = self._normalize_male("ยินดีครับ 😊 มีอะไรอยากถามเพิ่มเติมไหมครับ?")
+            elif kind == "smalltalk":
+                msg = self._normalize_male("ครับ 😊 ถ้ามีคำถามเรื่องใบอนุญาต ภาษี หรือการจดทะเบียนร้านอาหาร ถามได้เลยครับ")
+            else:
+                msg = self._normalize_male("สวัสดีครับ 😊 มีอะไรให้ช่วยเรื่องกฎหมายร้านอาหารไหมครับ?")
+            self._add_assistant(state, msg)
+            state.last_action = "greeting_short"
+            _LOG.info("[Supervisor] _handle_greeting show_menu=False kind=%r input=%r", kind, raw[:40])
+            return state, msg
+
         turns = int(state.context.get("greet_menu_turns") or 0)
         include_intro = turns == 0
 
@@ -3745,7 +3834,7 @@ class PersonaSupervisor:
             topics = [t for t, _ in self._FIXED_GREETING_MENU]
             topic_descs = [d for _, d in self._FIXED_GREETING_MENU]
         else:
-            # Subsequent greetings (re-greet): use dynamic random topics as before
+            # On-demand menu: use context-relevant topics from last conversation
             topics = self._compose_menu_topics(state, size=self._MENU_SIZE)
             _cached_descs = (state.context or {}).get("last_menu_topic_descs")
             _cached_topics = (state.context or {}).get("last_menu_topics")
@@ -4011,6 +4100,23 @@ class PersonaSupervisor:
                     st2.last_action = "academic_resume"
                     return st2, reply
 
+        # 2.2c) Early off-topic guardrail — zero LLM calls, pure regex.
+        # If input has NO legal/business signal AND is not a number AND is not a greeting,
+        # deflect immediately (saves style+typo+fallback_intent+deflect ~4 LLM calls).
+        # Conditions to NOT short-circuit: legal signal present, number, question mark (might
+        # be a legal question phrased as question), or looks like greeting/thanks.
+        if (
+            raw_stripped
+            and not self._LEGAL_SIGNAL_RE.search(raw_stripped)
+            and not self._LIKELY_SELECTION_RE.match(raw_stripped)
+            and not self._ANY_NUMBER_RE.search(raw_stripped)
+            and not self._QUESTION_MARKERS_RE.search(raw_stripped)
+            and not self._looks_like_greeting_or_thanks(raw_stripped)
+            and not self._looks_like_legal_question(raw_stripped)
+        ):
+            _LOG.info("[Supervisor] 2.2c early_offtopic → deflect input=%r", raw_stripped[:60])
+            return self._handle_deflect(state, raw_stripped)
+
         # 2.3) style request -> silent switch (no confirmation dialog)
         # FIX #2: A legal question that happens to contain words like "รายละเอียด/ทั้งหมด"
         # must NOT be intercepted here.  Style detection only applies when the input is
@@ -4127,9 +4233,9 @@ class PersonaSupervisor:
             if _is_typo:
                 return self._handle_typo_prompt(state, raw_stripped, _typo_suggested)
 
-        # 2.7) greeting/noise -> always show refreshed menu
+        # 2.7) greeting/noise → short reply only, no topic menu
         if self._looks_like_greeting_or_thanks(raw_stripped) or self._is_noise(raw_stripped) or not raw_stripped:
-            return self._handle_greeting(state, user_input=raw_stripped)
+            return self._handle_greeting(state, user_input=raw_stripped, show_menu=False)
 
         # 2.8) mode status
         if self._looks_like_mode_status_query(raw_stripped):
@@ -4194,10 +4300,10 @@ class PersonaSupervisor:
             st2.last_action = "practical_answer"
             return st2, reply
 
-        # 3) Short interjection → re-show menu gracefully instead of error
+        # 3) Short interjection → short reply, no topic menu
         if self._TH_INTERJECTION_RE.match(raw_stripped):
             _LOG.info("[Supervisor] interjection→greeting persona=%s input=%r", getattr(state, "persona_id", "?"), raw_stripped[:30])
-            return self._handle_greeting(state, raw_stripped)
+            return self._handle_greeting(state, raw_stripped, show_menu=False)
 
         # 3.1) "ขอหัวข้อใหม่", "มีเรื่องอื่นอีกไหม", "แนะนำหัวข้อ" → refresh menu
         if self._NEW_TOPIC_RE.search(raw_stripped):
@@ -4314,10 +4420,9 @@ class PersonaSupervisor:
             return st2, reply
 
         if fallback_intent == "greeting":
-            return self._handle_greeting(state, raw_stripped)
+            return self._handle_greeting(state, raw_stripped, show_menu=False)
 
-        # Truly unroutable → show topic menu (better than dead-end error)
-        _LOG.warning("[Supervisor] fallback_safe_return persona=%s input=%r", getattr(state, "persona_id", "?"), raw_stripped[:60])
-        state.last_action = "fallback_safe_return"
-        return self._handle_greeting(state, raw_stripped)
+        # Truly off-topic (unknown intent) → guardrail deflect
+        _LOG.info("[Supervisor] unknown_intent → deflect input=%r", raw_stripped[:60])
+        return self._handle_deflect(state, raw_stripped)
     
