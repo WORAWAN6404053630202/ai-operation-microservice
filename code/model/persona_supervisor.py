@@ -1925,18 +1925,44 @@ class PersonaSupervisor:
 
             # ── Rule -1: department dimension (e.g. multiple banks for QR Payment) ──
             # Ask FIRST — different departments have completely different procedures/docs.
-            # Only add if ≥2 distinct non-empty department values exist for this license.
+            # Only add if ≥2 distinct non-empty department values AND each dept has
+            # a meaningful number of docs (≥2 docs each), to avoid cases where one dept
+            # covers nearly all docs and the other is just a single minor topic.
+            # ALSO skip if department is fully determined by entity_type (1:1 mapping)
+            # — in that case asking entity_type is sufficient (e.g. ใบทะเบียนพาณิชย์:
+            #   บุคคลธรรมดา→สำนักงานเขต, นิติบุคคล→กรมพัฒนาธุรกิจ).
             dept_opts: set = set()
+            _dept_doc_count: dict = {}
+            # Track which entity_types appear per dept (for correlation check)
+            _dept_entities: dict = {}  # dept → set of entity_type values
             for md in mds:
                 dept = ((md or {}).get("department") or "").strip()
+                entity = ((md or {}).get("entity_type_normalized") or "").strip()
                 if dept and dept not in ("nan", "None"):
                     dept_opts.add(dept)
-            if len(dept_opts) >= 2:
+                    _dept_doc_count[dept] = _dept_doc_count.get(dept, 0) + 1
+                    _dept_entities.setdefault(dept, set()).add(entity)
+            # Each dept must have ≥2 docs to be considered a real split worth asking
+            _dept_opts_qualified = {d for d in dept_opts if _dept_doc_count.get(d, 0) >= 2}
+            # Check 1:1 correlation: if every qualified dept maps exclusively to
+            # one entity_type (ignoring '' universal docs), dept is derivable from entity
+            # → no need to ask separately.
+            def _dept_determined_by_entity(dept_entities: dict, qualified: set) -> bool:
+                for dept in qualified:
+                    specific = {e for e in dept_entities.get(dept, set()) if e}
+                    if len(specific) > 1:
+                        return False  # this dept has mixed entity types → not derivable
+                return True
+            _dept_is_entity_derived = (
+                len(_dept_opts_qualified) >= 2
+                and _dept_determined_by_entity(_dept_entities, _dept_opts_qualified)
+            )
+            if len(_dept_opts_qualified) >= 2 and not _dept_is_entity_derived:
                 # Build a generic question that fits any department type (bank, govt office, etc.)
                 # Avoid hardcoding "ธนาคาร" which only fits QR Payment context.
                 _all_dept_are_banks = all(
                     any(kw in d for kw in ("ธนาคาร", "Bank", "bank"))
-                    for d in dept_opts
+                    for d in _dept_opts_qualified
                 )
                 _dept_question = (
                     "ต้องการสมัครกับธนาคารใดครับ?"
@@ -1945,15 +1971,15 @@ class PersonaSupervisor:
                 )
                 slots.append({
                     "key": "department",
-                    "options": sorted(dept_opts),
+                    "options": sorted(_dept_opts_qualified),
                     "question": _dept_question,
                 })
                 seen_keys.add("department")
-                _LOG.info("[Supervisor] discover_slots[%r]: department → %s", license_type, sorted(dept_opts))
+                _LOG.info("[Supervisor] discover_slots[%r]: department → %s (counts=%s)", license_type, sorted(_dept_opts_qualified), _dept_doc_count)
             else:
                 _LOG.info(
-                    "[Supervisor] discover_slots[%r]: department SKIPPED — only %d value(s)",
-                    license_type, len(dept_opts),
+                    "[Supervisor] discover_slots[%r]: department SKIPPED — qualified=%d entity_derived=%s (counts=%s)",
+                    license_type, len(_dept_opts_qualified), _dept_is_entity_derived, _dept_doc_count,
                 )
 
             # ── Rule 0: location dimension (กรุงเทพฯ vs ต่างจังหวัด) ─────────────
