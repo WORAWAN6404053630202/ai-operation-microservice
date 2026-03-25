@@ -1699,10 +1699,11 @@ class PracticalPersonaService:
         else:
             _docs_to_process = _all_docs[:_prompt_max_docs]
 
-        # Pass 1: classify research_reference links (globally deduped) → SERVICE_LINKS + FORM_LINKS
+        # Pass 1: classify research_reference links (globally deduped) → SERVICE / FORM / GUIDE
         # Same _classify_link logic as Academic — no URL pattern rules needed in the prompt
-        _link_service: list = []  # (desc, url) registration/portal links
-        _link_form: list = []     # (desc, url) fillable form links
+        _link_service: list = []  # (desc, url) registration/portal links — always shown
+        _link_form: list = []     # (desc, url) fillable form links — always shown
+        _link_guide: list = []    # (desc, url) guide/manual links — shown only when user asks
         _link_seen: set = set()   # global dedup key
         for _d1 in _docs_to_process:
             _rr_raw = str((_d1.get("metadata") or {}).get("research_reference") or "").strip()
@@ -1718,7 +1719,9 @@ class PracticalPersonaService:
                     _link_service.append((_desc1, _url1))
                 elif _cat1 == "form":
                     _link_form.append((_desc1, _url1))
-                # guide → dropped in practical, ref → dropped in practical
+                elif _cat1 == "guide":
+                    _link_guide.append((_desc1, _url1))
+                # ref → dropped always
 
         # Pass 2: build docs_json with per-license dedup for long fields
         # research_reference is now injected as labeled sections outside docs_json
@@ -1759,6 +1762,15 @@ class PracticalPersonaService:
                 return f"- {desc}\n  {url}"
             return f"- {url or desc}"
 
+        # Guide links shown only when user explicitly requests links/manuals
+        _user_wants_links = bool(re.search(
+            r"(ขอลิงค์|ขอลิงก์|ส่งลิงค์|ส่งลิงก์|ลิงค์คู่มือ|ลิงก์คู่มือ"
+            r"|ขอดูลิงค์|ขอดูลิงก์|URL|ดาวน์โหลด"
+            r"|ขอคู่มือ|ขอดูคู่มือ|ส่งคู่มือ|คู่มือ(การ|สำหรับ|ของ)"
+            r"|ขอแบบฟอร์ม|ส่งแบบฟอร์ม)",
+            user_text or "", re.IGNORECASE,
+        ))
+
         _link_section = ""
         if _link_service:
             _link_section += "\n🌐 SERVICE_LINKS — copy เหล่านี้ตรงๆ under section '🌐 เว็บลงทะเบียน':\n"
@@ -1766,6 +1778,9 @@ class PracticalPersonaService:
         if _link_form:
             _link_section += "\n📄 FORM_LINKS — copy เหล่านี้ตรงๆ under section '📄 แบบฟอร์ม':\n"
             _link_section += "\n".join(_fmt_prac_link(d, u) for d, u in _link_form) + "\n"
+        if _link_guide and _user_wants_links:
+            _link_section += "\n📖 GUIDE_LINKS — user ขอคู่มือ: copy เหล่านี้ตรงๆ under section '📖 คู่มือ':\n"
+            _link_section += "\n".join(_fmt_prac_link(d, u) for d, u in _link_guide) + "\n"
 
         self._debug_log("pre_llm", query=user_text, docs_json=docs_json)
 

@@ -239,6 +239,17 @@ class PersonaSupervisor:
         r"^(อันไหน|แบบไหน|กรณีไหน|ของ(ฉัน|ผม|หนู)|แบบ(ฉัน|ผม|หนู)|กรณีของ|ที่เหมาะกับ|ที่ใช้ได้กับ|สำหรับ(ฉัน|ผม|หนู|กรณีนี้|ประเภทนี้))",
         re.IGNORECASE,
     )
+    # Link/document request — user asking for URLs, forms, guides, or downloads
+    # Used to override new_topic routing when there's an active context
+    _LINK_REQUEST_RE = re.compile(
+        r"(ขอลิงค์|ขอลิงก์|ส่งลิงค์|ส่งลิงก์|ลิงค์คู่มือ|ลิงก์คู่มือ"
+        r"|ลิงค์แบบฟอร์ม|ลิงก์แบบฟอร์ม|ขอดูลิงค์|ขอดูลิงก์"
+        r"|ลิงค์(ที่|ของ|ด้วย)|ลิงก์(ที่|ของ|ด้วย)|URL"
+        r"|ดาวน์โหลด(เอกสาร|แบบฟอร์ม|คู่มือ|ไฟล์)"
+        r"|ขอคู่มือ|ขอดูคู่มือ|ส่งคู่มือ|คู่มือ(การ|สำหรับ|ของ)"
+        r"|ขอแบบฟอร์ม|ส่งแบบฟอร์ม|แบบฟอร์ม(ที่|ของ|ด้วย))",
+        re.IGNORECASE,
+    )
     # Short Thai interjections that are not legal questions → re-show menu
     _TH_INTERJECTION_RE = re.compile(
         r"^\s*(เอ้|เฮ้|เฮ|โอ้|โอ้โห|อ้าว|อ้าว|ว้าว|เออ|เอ่อ|อ่า|อ้า|อืม|อ๋อ|อ๋อ|เออนะ|เอ้าๆ|งั้นหรอ|งั้นเหรอ|จริงดิ|จริงเหรอ|ไม่ใช่เหรอ|เหรอ)\s*(ครับ|คับ|ค่ะ|คะ|นะ|นะครับ|นะคะ)?\s*$",
@@ -4219,6 +4230,21 @@ class PersonaSupervisor:
                 st2.last_action = "practical_contextual_followup"
                 return st2, reply
 
+        # 3.4) Link/document request with active context → practical directly (no LLM needed)
+        # Catches "ขอลิงค์คู่มือ", "ส่งแบบฟอร์ม", "ขอดาวน์โหลด" etc. before LLM misclassifies as new_topic
+        if self._LINK_REQUEST_RE.search(raw_stripped):
+            _last_q_lr = (state.context or {}).get("last_user_legal_query", "").strip()
+            _has_ctx_lr = bool(_last_q_lr or (state.context or {}).get("last_topic") or state.current_docs)
+            if _has_ctx_lr:
+                _LOG.info("[Supervisor] 3.4 link_request with active context → practical: %r", raw_stripped[:60])
+                if _last_q_lr:
+                    self._ensure_practical_retrieval_for_legal(state, _last_q_lr)
+                st2, reply = self._practical.handle(state, raw_stripped, _internal=False)
+                reply = self._normalize_male(reply)
+                self._add_assistant(st2, reply)
+                st2.last_action = "practical_link_request"
+                return st2, reply
+
         # 4) LLM fallback intent classifier — no hardcode, no dead-end error message
         # FIX #3 (part 2): reuse the cached fallback-intent result from step 2.2b if available,
         # so we never call llm_fallback_intent_call twice on the same input in one turn.
@@ -4241,6 +4267,27 @@ class PersonaSupervisor:
 
         if fallback_intent == "new_topic":
             _LOG.info("[Supervisor] fallback_llm→new_topic input=%r", raw_stripped[:40])
+            # Guard: LLM may misclassify follow-ups (link/elaborate requests) as new_topic.
+            # If user has active context AND query is link/follow-up → route practical instead.
+            _has_active_ctx_nt = bool(
+                (state.context or {}).get("last_user_legal_query")
+                or (state.context or {}).get("last_topic")
+                or state.current_docs
+            )
+            if _has_active_ctx_nt and (
+                self._LINK_REQUEST_RE.search(raw_stripped)
+                or self._ELABORATE_RE.search(raw_stripped)
+                or self._FOLLOWUP_CONTEXTUAL_RE.search(raw_stripped)
+            ):
+                _last_q_nt = (state.context or {}).get("last_user_legal_query", "").strip()
+                _LOG.info("[Supervisor] new_topic overridden → active context follow-up: %r", raw_stripped[:60])
+                if _last_q_nt:
+                    self._ensure_practical_retrieval_for_legal(state, _last_q_nt)
+                st2, reply = self._practical.handle(state, raw_stripped, _internal=False)
+                reply = self._normalize_male(reply)
+                self._add_assistant(st2, reply)
+                st2.last_action = "practical_follow_up"
+                return st2, reply
             return self._handle_greeting(state, raw_stripped)
 
         if fallback_intent == "elaborate":
