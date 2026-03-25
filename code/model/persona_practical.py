@@ -72,17 +72,19 @@ def _classify_link(desc: str, url: str) -> str:
                         and not any(kw in desc_l for kw in ("แบบ ", "แบบฟอร์ม", "บอจ", "ภพ", "เอกสาร")))
         return "guide" if is_guide_pdf else "form"
 
-    # Non-PDF: form keywords in desc
-    if any(kw in desc_l for kw in _FORM_DESC_KW):
-        return "form"
-
     # ── Type 2: Guides/tutorials ────────────────────────────────────────────────
     _GUIDE_URL_KW = ("youtube", "youtu.be", "drive.google.com", "facebook.com",
                      "fb.me", "canva.com", "lin.ee", "line.me")
-    if any(kw in url_l for kw in _GUIDE_URL_KW):
-        return "guide"
+    # Guide desc check runs BEFORE form check for non-PDF:
+    # "คู่มือการกรอกเอกสาร..." has both guide + form keywords — guide wins
     if any(kw in desc_l for kw in _GUIDE_DESC_KW):
         return "guide"
+    if any(kw in url_l for kw in _GUIDE_URL_KW):
+        return "guide"
+
+    # Non-PDF: form keywords in desc
+    if any(kw in desc_l for kw in _FORM_DESC_KW):
+        return "form"
 
     # ── Type 3: Reference (fallback) ───────────────────────────────────────────
     return "ref"
