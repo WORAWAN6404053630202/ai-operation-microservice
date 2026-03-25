@@ -1949,19 +1949,30 @@ class PersonaSupervisor:
             # Ask this FIRST — it determines which service channel/fee/procedure applies.
             # location is a single-value metadata field per doc — if ≥2 distinct values
             # exist across docs for this license, real split exists → ask the user.
+            # Display label is derived from operation_topic of actual docs — NOT hardcoded.
+            # e.g. if docs with location='กรุงเทพฯ' have topic 'กรุงเทพฯ และปริมณฑล'
+            #      then show 'กรุงเทพฯ และปริมณฑล' to user, but filter key stays 'กรุงเทพฯ'.
             location_opts: set = set()
+            # Map: filter_value → display_label (built from real operation_topic)
+            _loc_display: dict = {}
             for md in mds:
                 loc = ((md or {}).get("location") or "").strip()
                 if loc and loc not in ("nan", "None"):
                     location_opts.add(loc)
+                    # Use operation_topic as display label if it contains the location name
+                    topic = ((md or {}).get("operation_topic") or "").strip()
+                    if topic and loc in topic and topic != loc:
+                        # topic is more descriptive (e.g. 'กรุงเทพฯ และปริมณฑล') → use it
+                        _loc_display[loc] = topic
             if len(location_opts) >= 2:
+                _display_opts = [_loc_display.get(loc, loc) for loc in sorted(location_opts)]
                 slots.append({
                     "key": "location",
-                    "options": sorted(location_opts),
+                    "options": _display_opts,
                     "question": "ร้านของคุณตั้งอยู่ในพื้นที่ใดครับ?",
                 })
                 seen_keys.add("location")
-                _LOG.info("[Supervisor] discover_slots[%r]: location → %s", license_type, sorted(location_opts))
+                _LOG.info("[Supervisor] discover_slots[%r]: location → %s (display=%s)", license_type, sorted(location_opts), _display_opts)
             else:
                 _LOG.info(
                     "[Supervisor] discover_slots[%r]: location SKIPPED — only %d location value(s) in docs",
@@ -2887,6 +2898,17 @@ class PersonaSupervisor:
                     _location_val = "กรุงเทพฯ"
                 elif "ต่างจังหวัด" in _raw_lower or "ต่างหวัด" in _raw_lower:
                     _location_val = "ต่างจังหวัด"
+                elif "ปริมณฑล" in _raw_lower:
+                    # 'ปริมณฑล' alone: resolve by checking what the slot options say.
+                    # If the slot options (built from real operation_topic) contain 'กรุงเทพ'
+                    # alongside 'ปริมณฑล' → this license groups them → map to 'กรุงเทพฯ'.
+                    # Otherwise → ปริมณฑล is a separate province group → treat as ต่างจังหวัด.
+                    _loc_slot_opts = pending.get("options") if isinstance(pending, dict) else []
+                    _opts_str = " ".join(str(o) for o in (_loc_slot_opts or []))
+                    if "กรุงเทพ" in _opts_str and "ปริมณฑล" in _opts_str:
+                        _location_val = "กรุงเทพฯ"  # e.g. option was 'กรุงเทพฯ และปริมณฑล'
+                    else:
+                        _location_val = "ต่างจังหวัด"  # default: ปริมณฑล = ต่างจังหวัด
                 if "มากกว่า 200" in _raw_lower or "เกิน 200" in _raw_lower or "> 200" in _raw_lower:
                     _area_size_val = "มากกว่า 200 ตารางเมตร"
                 elif "น้อยกว่า 200" in _raw_lower or "ไม่เกิน 200" in _raw_lower or "< 200" in _raw_lower:

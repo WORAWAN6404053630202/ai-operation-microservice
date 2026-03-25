@@ -2026,7 +2026,24 @@ Your JSON response:
                     if _inferred_key_check == "area_size":
                         parsed_opts = ["น้อยกว่า 200 ตารางเมตร", "มากกว่า 200 ตารางเมตร"]
                     elif _inferred_key_check == "location_scope":
-                        parsed_opts = ["กรุงเทพฯ", "ต่างจังหวัด"]
+                        # Derive options from current_docs operation_topic — NOT hardcoded.
+                        # This ensures the display label matches the real data
+                        # (e.g. 'กรุงเทพฯ และปริมณฑล' vs plain 'กรุงเทพฯ').
+                        _loc_opts_from_docs: dict = {}  # filter_val → display_label
+                        for _d in (state.current_docs or []):
+                            _dmeta = _d.get("metadata") or {}
+                            _dloc = (_dmeta.get("location") or "").strip()
+                            _dtopic = (_dmeta.get("operation_topic") or "").strip()
+                            if _dloc and _dloc not in ("nan", "None"):
+                                if _dtopic and _dloc in _dtopic and _dtopic != _dloc:
+                                    _loc_opts_from_docs[_dloc] = _dtopic
+                                else:
+                                    _loc_opts_from_docs.setdefault(_dloc, _dloc)
+                        if len(_loc_opts_from_docs) >= 2:
+                            parsed_opts = [_loc_opts_from_docs[k] for k in sorted(_loc_opts_from_docs)]
+                        elif _loc_opts_from_docs:
+                            # Only 1 location in docs — no need to ask, but keep as-is
+                            parsed_opts = list(_loc_opts_from_docs.values())
                 if parsed_opts:
                     slot_key = self._infer_slot_key_from_question(question, options=parsed_opts)
                     allow_multi = True if slot_key == self._PHASE3_SLOT_KEY else False
