@@ -18,8 +18,10 @@ import conf
 # Safe directories for rmtree — prevents accidental deletion outside project scope
 _SAFE_RMTREE_PARENTS = [
     str(Path.cwd()),
+    str(Path.cwd().parent),          # project root (one level up from code/)
     str(Path.home() / ".cache"),
     str(Path.home() / "Downloads"),
+    str(Path.home()),                 # anywhere under home (ec2-user, ubuntu, etc.)
 ]
 
 
