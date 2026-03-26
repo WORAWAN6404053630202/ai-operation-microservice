@@ -226,10 +226,10 @@ class PersonaSupervisor:
     # Depth/detail requests — signals user wants more elaboration on current topic.
     # These must NOT be deflected by 2.2c and must be routed to Academic persona.
     _DEPTH_DETAIL_RE = re.compile(
-        r"(แบบละเอียด|ละเอียดกว่า|ละเอียดหน่อย|ละเอียดขึ้น|เชิงลึก|แบบเต็ม"
+        r"(แบบละเอียด|ละเอียดกว่า|ละเอียดมากกว่า|ละเอียดหน่อย|ละเอียดขึ้น|เชิงลึก|แบบเต็ม"
         r"|ครบถ้วน|ทั้งหมดเลย|แบบวิชาการ|อธิบายละเอียด|แบบเต็มๆ"
         r"|ขอดูแบบละเอียด|ขอรายละเอียด|อธิบายเพิ่ม|อธิบายต่อ|อธิบายให้ชัดเจนขึ้น"
-        r"|ขอเพิ่มเติม|ดูเพิ่มเติม|รายละเอียดเพิ่ม|แบบให้ลึกซึ้งยิ่งขึ้น)",
+        r"|ขอเพิ่มเติม|ดูเพิ่มเติม|รายละเอียดเพิ่ม|แบบให้ลึกซึ้งยิ่งขึ้น|มากกว่านี้)",
         re.IGNORECASE,
     )
 
@@ -1435,6 +1435,28 @@ class PersonaSupervisor:
             _ctx_slots_lr = (state.context or {}).get("slots") or {}
             _dept_known_lr = bool(_cs_lr.get("department") or _ctx_slots_lr.get("department"))
             if _dept_known_lr:
+                # Check if query explicitly mentions a DIFFERENT department than the cached one.
+                # e.g. user previously chose ธนาคารไทยพาณิชย์ but now asks about ธนาคารกสิกรไทย.
+                _cached_dept = (_cs_lr.get("department") or _ctx_slots_lr.get("department") or "").strip()
+                _available_depts: list = []
+                for _d in docs:
+                    if not isinstance(_d, dict):
+                        continue
+                    _dv = ((_d.get("metadata") or {}).get("department") or "").strip()
+                    if _dv and _dv not in _available_depts:
+                        _available_depts.append(_dv)
+                _query_dept = next((d for d in _available_depts if d and d in query), None)
+                if _query_dept and _query_dept != _cached_dept:
+                    _LOG.info(
+                        "[Supervisor] link query: dept override %r → %r (from query)",
+                        _cached_dept, _query_dept,
+                    )
+                    if hasattr(state, "save_collected_slot"):
+                        state.save_collected_slot("department", _query_dept)
+                    if state.context is not None:
+                        state.context.setdefault("slots", {})["department"] = _query_dept
+                        if "collected_slots" in state.context:
+                            state.context["collected_slots"]["department"] = _query_dept
                 _LOG.info("[Supervisor] link query + dept known — skipping slot queue: %r", query[:60])
                 return
             # dept unknown → fall through to build dept-only slot queue
