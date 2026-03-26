@@ -12,15 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirements.txt ก่อนเพื่อใช้ Docker cache
-COPY requirements.txt /app/
+# Copy requirements ก่อนเพื่อใช้ Docker cache
+COPY requirements.txt requirements-dev.txt /app/
 
-# ติดตั้ง Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# ติดตั้ง Python dependencies รวม dev tools (gradio, pytest)
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
 # Copy code และ data
 COPY code/ /app/code/
-COPY local_chroma_v2/ /app/local_chroma_v2/
+COPY local_chroma_v3/ /app/local_chroma_v3/
 
 # ตั้งค่า environment variables
 ENV PYTHONPATH=/app/code
@@ -49,15 +49,15 @@ COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY code/ /app/code/
-COPY local_chroma_v2/ /app/local_chroma_v2/
+COPY local_chroma_v3/ /app/local_chroma_v3/
 
 ENV PYTHONPATH=/app/code
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 3000
 
-# ใช้ --reload เหมือน dev เพื่อทดสอบ
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000", "--reload"]
+# Staging: production-like (ไม่มี --reload)
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000", "--workers", "1"]
 
 # ======================================================
 # STAGE: PRODUCTION (Optimized for Performance & Security)
@@ -83,7 +83,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY code/ /app/code/
-COPY local_chroma_v2/ /app/local_chroma_v2/
+COPY local_chroma_v3/ /app/local_chroma_v3/
 COPY pyproject.toml /app/
 
 # Create necessary directories and set permissions
@@ -99,10 +99,10 @@ ENV PYTHONUNBUFFERED=1
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:3000/api/operation/healthcheck || exit 1
+    CMD curl -f http://localhost:3000/health || exit 1
 
 # Expose port
 EXPOSE 3000
 
 # Production: Multi-worker setup with optimization
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000", "--workers", "4", "--loop", "uvloop", "--http", "httptools"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000", "--workers", "1", "--loop", "uvloop", "--http", "httptools"]

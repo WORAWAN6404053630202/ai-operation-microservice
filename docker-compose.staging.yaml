@@ -14,7 +14,7 @@ services:
     ports:
       - "${PORT}:3000"
     volumes:
-      - ./code:/app
+      - ./code:/app/code
     env_file:
       - ./env.properties 
     healthcheck:

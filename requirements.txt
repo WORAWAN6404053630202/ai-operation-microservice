@@ -7,6 +7,8 @@ rich>=13.7.0
 # --- FastAPI ---
 fastapi>=0.115.2,<1
 uvicorn>=0.27,<1
+uvloop>=0.19.0
+httptools>=0.6.0
 
 # --- LangChain (new architecture) ---
 langchain>=0.2.14
@@ -26,13 +28,6 @@ huggingface-hub>=0.23.0,<1.0
 
 # --- Data Processing ---
 pandas>=2.0.0
-
-# --- Web UI (optional) ---
-gradio>=6,<7
-gradio-client>=2,<3
-
-# --- Testing (optional) ---
-pytest>=7.4.0
 
 # --- Utilities ---
 psutil>=5.9.0  # System monitoring (CPU, memory, disk)
