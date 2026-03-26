@@ -202,9 +202,7 @@ class LocalVectorStoreManager:
 
         return self._build_retriever()
 
-    # ------------------------------------------------------------------
     # Retrieval helpers (infra-only)
-    # ------------------------------------------------------------------
     def retrieve_raw_docs(self, query: str, k: Optional[int] = None) -> List[Document]:
         if not query or not str(query).strip():
             return []

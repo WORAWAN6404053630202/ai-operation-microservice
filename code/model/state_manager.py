@@ -186,9 +186,7 @@ class StateManager:
                 pass
             self._release_lock(session_id)
 
-    # ============================================================
-    # NEW: session listing
-    # ============================================================
+    # session listing
     def list_sessions(self, limit: int = 20, client_key: Optional[str] = None) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         client_key = (client_key or "").strip()
@@ -235,9 +233,7 @@ class StateManager:
 
         return out
 
-    # ============================================================
-    # NEW: purge old sessions
-    # ============================================================
+    # purge old sessions
     def purge_older_than_days(self, days: int = 7) -> int:
         deleted = 0
         now = time.time()

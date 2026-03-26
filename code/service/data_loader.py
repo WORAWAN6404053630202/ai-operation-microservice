@@ -117,9 +117,7 @@ class DataLoader:
         print(f"Added {docs_added} documents")
         return docs_added
 
-    # -----------------------------
-    # Header resolution (NEW)
-    # -----------------------------
+    # Header resolution 
     def _resolve_col(
         self,
         df: pd.DataFrame,
@@ -364,9 +362,7 @@ class DataLoader:
             return "บุคคลธรรมดา"
         return None
 
-    # -----------------------------
-    # RAG: content shaping (NEW)
-    # -----------------------------
+    # RAG: content shaping
     def _join_nonempty(self, parts: List[str]) -> str:
         parts2 = [p.strip() for p in (parts or []) if p and str(p).strip()]
         return "\n".join(parts2).strip()
@@ -384,7 +380,7 @@ class DataLoader:
         For e5 models the text is prepended with "passage: " by the embedding layer,
         so we do NOT add it here.
         """
-        # ── Context header: high-signal disambiguators ────────────────────────
+        # Context header: high-signal disambiguators
         head_parts = []
         if md.get("license_type"):
             head_parts.append(f"ใบอนุญาต/ทะเบียน: {md['license_type']}")
@@ -405,7 +401,7 @@ class DataLoader:
 
         head = self._join_nonempty(head_parts)
 
-        # ── Answer body: all actionable fields ────────────────────────────────
+        # Answer body: all actionable fields
         body_parts = []
         if md.get("operation_steps"):
             body_parts.append(f"ขั้นตอนการดำเนินการ:\n{md['operation_steps']}")
@@ -455,7 +451,7 @@ class DataLoader:
             op_topic = self._get_row_value(row, colmap.get("operation_topic"))
             op_by_dept = self._get_row_value(row, colmap.get("operation_by_department"))
 
-            # ── Derived metadata: entity, location, area_size ──────────────────
+            # Derived metadata: entity, location, area_size
             entity_from_reg = self._normalize_entity_type(reg_type)
             entity_from_topic = self._extract_entity_from_topic(op_topic, reg_type)
             # Prefer reg-based entity; fill with topic-based if missing
@@ -472,10 +468,10 @@ class DataLoader:
                 "operation_topic": op_topic,
                 "registration_type": reg_type,
                 "entity_type_normalized": entity_normalized,
-                # ── NEW parsed fields ──────────────────────────────────────────
+                # Derived metadata: entity, location, area_size
                 "location": location,          # 'กรุงเทพฯ' | 'ต่างจังหวัด' | None
                 "area_size": area_size,        # 'มากกว่า 200 ตารางเมตร' | 'ไม่เกิน 200 ตารางเมตร' | None
-                # ── Answer fields ──────────────────────────────────────────────
+                # Answer fields
                 "terms_and_conditions": self._get_row_value(row, colmap.get("terms_and_conditions")),
                 "service_channel": self._get_row_value(row, colmap.get("service_channel")),
                 "operation_steps": self._get_row_value(row, colmap.get("operation_steps")),

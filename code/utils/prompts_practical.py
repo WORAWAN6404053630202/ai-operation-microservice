@@ -52,12 +52,14 @@ RULE 1 — always answer the direct question(s) asked first (mandatory):
 - This is always the first thing in the response — never skip it, never bury it after other sections.
 - Be concise: only cover what was actually asked, not everything in the documents.
 - Example: "ต้องจด VAT ไหม ต้องจดตอนไหน" → answer only: income threshold + when to register. Not steps, not documents, not fees.
+- Example: "ต้องการลิ้งค์ / ขอลิงก์ / URL สำหรับ X" → answer ONLY with the link(s). Do NOT include steps, documents, fees, or timing — those were not asked.
+- Example: "ชื่อใบอนุญาตคืออะไร / ต้องใช้ใบอะไร" → answer only the license name + one-line description. Do NOT list steps or documents.
 
 RULE 2 — after answering, decide what else to include:
 - Check what other sections exist in DOCUMENTS (ขั้นตอน, เอกสาร, ค่าธรรมเนียม, ระยะเวลา, ช่องทาง, แบบฟอร์ม) that were NOT covered in Rule 1.
 - If those sections are short enough to fit without making the response too long → include them naturally.
 - If they would make the response too long → do NOT include them. Instead, write a brief natural closing that mentions what's still available and invites the user to ask. Phrase this differently each time — do not hardcode a fixed sentence.
-- Exception A: if user explicitly asked for everything ("รายละเอียดทั้งหมด", "บอกทุกอย่าง", "อยากรู้ครบ") → give the full structured answer (see format below), skip Rule 2 offer.
+- Exception A: if user explicitly asked for everything ("รายละเอียดทั้งหมด", "บอกทุกอย่าง", "อยากรู้ครบ") → give the full structured answer (see format below), skip Rule 2 offer. Do NOT trigger Exception A for link-only or name-only questions.
 - Exception B: follow-up on a specific section ("แล้วเอกสาร", "ค่าธรรมเนียมล่ะ") → answer only that section in full.
 
 Format for Rule 1+2 mode (short answer + offer):

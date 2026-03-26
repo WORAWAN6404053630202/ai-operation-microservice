@@ -36,7 +36,7 @@ def _classify_link(desc: str, url: str) -> str:  # noqa: ARG001 — url intentio
     """
     desc_l = desc.lower().strip()
 
-    # ── Guide: manual, video, workflow, how-to ────────────────────────────────
+    # Guide: manual, video, workflow, how-to
     _GUIDE_KW = (
         "คู่มือ",
         "youtube", "youtu.be", "vdo ", " vdo",
@@ -51,7 +51,7 @@ def _classify_link(desc: str, url: str) -> str:  # noqa: ARG001 — url intentio
     if any(kw in desc_l for kw in _GUIDE_KW):
         return "guide"
 
-    # ── Form: downloadable forms and documents ────────────────────────────────
+    # Form: downloadable forms and documents
     _FORM_KW = (
         "แบบฟอร์ม",
         "แบบ บอจ", "แบบ ก.", "แบบ ว.", "แบบ สปส", "แบบ สณ",
@@ -68,7 +68,7 @@ def _classify_link(desc: str, url: str) -> str:  # noqa: ARG001 — url intentio
     if any(kw in desc_l for kw in _FORM_KW):
         return "form"
 
-    # ── Registration: online portals and apps for applying ────────────────────
+    # Registration: online portals and apps for applying
     _REG_KW = (
         "สำหรับลงทะเบียน", "ลงทะเบียนออนไลน์",
         "ยื่นออนไลน์", "ยื่นจดทะเบียนออนไลน์",
@@ -79,7 +79,7 @@ def _classify_link(desc: str, url: str) -> str:  # noqa: ARG001 — url intentio
     if any(kw in desc_l for kw in _REG_KW):
         return "registration"
 
-    # ── Ref: fallback (laws, FAQ, general info pages) ─────────────────────────
+    # Ref: fallback (laws, FAQ, general info pages)
     return "ref"
 
 
@@ -150,7 +150,7 @@ def _parse_link_entries(text: str) -> list:
 
 
 
-# 🎯 Token: Whitelist — ส่ง metadata keys ที่ LLM ต้องการโดยตรง
+# Token: Whitelist — ส่ง metadata keys ที่ LLM ต้องการโดยตรง
 # content ถูกตัดที่ LLM_DOC_CHARS_PRACTICAL (400 chars) ดังนั้น fields สำคัญต้องอยู่ใน metadata
 _LLM_METADATA_WHITELIST = frozenset({
     "license_type",            # ประเภทใบอนุญาต
@@ -216,9 +216,7 @@ class PracticalPersonaService:
     _NUM_OPTION_LINE_RE = re.compile(r"^\s*(\d{1,2})\)\s*(.+?)\s*$")
     _LIKELY_SELECTION_RE = re.compile(r"^\s*[\d\s,/-]+\s*$")
 
-    # --------------------------
     # Topic menu sanitation (STRICT)
-    # --------------------------
     _TOPIC_MIN_LEN = 3
     _TOPIC_MAX_LEN = 52
     _TOPIC_REJECT_IF_HAS_NEWLINE = True
@@ -237,9 +235,7 @@ class PracticalPersonaService:
             return ""
         return t
 
-    # --------------------------
     # Owner/menu guards (NEW)
-    # --------------------------
     def _supervisor_owns_menu(self, state: ConversationState) -> bool:
         ctx = state.context or {}
         return bool(ctx.get("supervisor_owns_menu", False))
@@ -253,9 +249,7 @@ class PracticalPersonaService:
         state.context = state.context or {}
         state.context["last_bot_owner"] = (owner or "").strip()
 
-    # --------------------------
     # Safe append (dedupe)
-    # --------------------------
     def _append_user_once(self, state: ConversationState, content: str) -> None:
         if content is None:
             return
@@ -285,9 +279,7 @@ class PracticalPersonaService:
         state.messages.append({"role": "assistant", "content": c})
         self._set_last_bot_owner(state, "practical")
 
-    # --------------------------
     # Greeting prefix (Practical fallback)
-    # --------------------------
     _GREET_PREFIX_FALLBACKS: Dict[str, str] = {
         "greet": "สวัสดีครับ ต้องการข้อมูลด้านใดสำหรับร้านอาหารของคุณครับ",
         "thanks": "ยินดีครับ อยากไปต่อหัวข้อไหนครับ",
@@ -327,11 +319,11 @@ class PracticalPersonaService:
                 f"ตัวอย่างหัวข้อในระบบ (เพื่ออ้างอิงคำ): {menu_preview}\n"
             )
             try:
-                # ✅ วัดเวลาการเรียก LLM
+                # วัดเวลาการเรียก LLM
                 with TimingContext(logger, "llm_greet_call"):
                     text = extract_llm_text(llm_invoke(llm, [HumanMessage(content=prompt)], logger=_LOG, label="Practical/greet")).strip()
                     
-                # ✅ Log สำเร็จ
+                # Log สำเร็จ
                 logger.log_with_data("info", "💬 สร้างคำทักทายสำเร็จ", {
                     "action": "greet_generation",
                     "kind": kind,
@@ -340,7 +332,7 @@ class PracticalPersonaService:
                     "response_length": len(text)
                 })
             except Exception as e:
-                # ✅ Log error
+                # Log error
                 logger.log_with_data("error", "❌ สร้างคำทักทายล้มเหลว", {
                     "action": "greet_generation",
                     "error": str(e),
@@ -384,9 +376,7 @@ class PracticalPersonaService:
 
         return prefix.strip()
 
-    # --------------------------
     # Practical policy lint (P0 last gate)
-    # --------------------------
     _MULTI_Q_SPLIT_RE = re.compile(r"[?？]\s*")
     _META_TALK_RE = re.compile(
         r"(ในฐานะ(ของ)?(บอท|ผู้ช่วย)|ฉันจะ|ผมจะ|ขออนุญาต|ขออธิบายว่า|ระบบนี้|นโยบาย|policy|ตามที่คุณขอ|ผมไม่สามารถ|ฉันไม่สามารถ|\bdocuments\b)",
@@ -450,15 +440,28 @@ class PracticalPersonaService:
         )
         # Preserve newlines — only collapse horizontal whitespace (spaces/tabs)
         t = re.sub(r"[ \t]+", " ", t)
+        # Convert indented numbered sub-items to bullets
+        # e.g. "   1. ระวางโทษ..." → "   • ระวางโทษ..."
+        t = re.sub(r'(?m)^([ \t]{2,})\d+[).]\s+', r'\1• ', t)
+        # Split emoji section header from first numbered item on the same line
+        # e.g. "📋 ขั้นตอนการดำเนินการ 1. เข้าสู่ระบบ" → split before "1."
+        t = re.sub(
+            r'([\u2600-\u27BF\U0001F300-\U0001FFFF][^\n]*?[ก-๙])\s+(\d+[).]\s)',
+            r'\1\n\2',
+            t,
+        )
         # Insert newlines before numbered sections (1) or 1. format) and bullet points if missing
         # Use negative lookahead (?!\d) to avoid splitting sub-steps like 1.1, 1.2 → "1. 1"
         t = re.sub(r"(?<!\n)\s+(\d+[).])(?!\d)\s*", r"\n\1 ", t)
         # Insert newlines before sub-steps like 1.1, 1.2, 2.3 (indent with 2 spaces)
         t = re.sub(r"(?<!\n)\s+(\d+\.\d+)\s+", r"\n  \1 ", t)
-        t = re.sub(r"(?<!\n)\s+([-•*])\s+", r"\n\1 ", t)
+        t = re.sub(r"(?<!\n)\s+([-•*])\s+(?!\d)", r"\n\1 ", t)
         # Insert newlines before emoji-prefixed steps (✅ ❌ 🔴 etc.) that start a new step
         t = re.sub(r"(?<!\n)\s+([\u2705\u274c\u26a0\u2139\U0001F4CB\U0001F4CC\U0001F4CD\U0001F4CE\U0001F4CF\U0001F534\U0001F7E2\U0001F7E1\U0001F7E0\U0001F535])", r"\n\1", t)
         t = "\n".join(ln.strip() for ln in t.split("\n") if ln.strip())
+        # Collapse "label line\nshort-value line" where value is a number/time/unit (≤25 chars).
+        # Fixes LLM splitting "ตัดรอบเวลา\n22.00 น." → "ตัดรอบเวลา 22.00 น."
+        t = re.sub(r"([^\n]+[ก-๙])\n(\d[^\n]{0,24})(?=\n|$)", r"\1 \2", t)
 
         if "?" in t or "？" in t:
             # Only strip at a "?" if what follows looks like a new question sentence or menu option,
@@ -582,9 +585,7 @@ class PracticalPersonaService:
 
         return t
 
-    # --------------------------
     # Phase 3 config (unchanged)
-    # --------------------------
     _PHASE3_MENU_HEADER = "ตอนนี้มีข้อมูลครบระดับหนึ่งแล้วครับ คุณอยากดูหัวข้อไหนก่อน?"
     _PHASE3_SLOT_KEY = "detail_section"
     _PHASE3_ALL = "ทั้งหมด"
@@ -644,9 +645,7 @@ class PracticalPersonaService:
     _PHASE3_ANSWER_CHAR_THRESHOLD = 520
     _PHASE3_ANSWER_LINE_THRESHOLD = 10
 
-    # --------------------------
     # Retrieval reuse/new-topic heuristic (unchanged)
-    # --------------------------
     _TOKEN_SPLIT_RE = re.compile(r"[\s/,\-–—|]+", re.UNICODE)
     _FOLLOWUP_SHORT_RE = re.compile(
         r"^(แล้ว(ไง|ล่ะ)?|แล้ว(เอกสาร|ขั้นตอน|ค่าธรรมเนียม)?|ต่อไปล่ะ|มีอะไรบ้าง|ขอ(เอกสาร|ขั้นตอน|ค่าธรรมเนียม|ระยะเวลา|ช่องทาง))\s*$"
@@ -679,9 +678,7 @@ class PracticalPersonaService:
             model_kwargs={"response_format": {"type": "json_object"}},
         )
 
-    # --------------------------
     # Normalization / detectors
-    # --------------------------
     def _normalize_for_intent(self, s: str) -> str:
         t = (s or "").strip().lower()
         t = re.sub(r"[!！?？。,，]+", " ", t)
@@ -770,9 +767,7 @@ class PracticalPersonaService:
 
         return False
 
-    # --------------------------
     # Slot + choices helpers (unchanged)
-    # --------------------------
     def _format_numbered_options(self, options: List[str], max_items: int = 9) -> str:
         opts = [str(x).strip() for x in (options or []) if str(x).strip()]
         opts = opts[:max_items]
@@ -861,9 +856,7 @@ class PracticalPersonaService:
             return self._PHASE3_SLOT_KEY
         return "choice"
 
-    # --------------------------
-    # Pending-slot recovery (OPT-IN + OWNER-GATED)  ✅ FIX
-    # --------------------------
+    # Pending-slot recovery (OPT-IN + OWNER-GATED)
     def _maybe_recover_pending_slot_from_last_bot(self, state: ConversationState, user_text: str) -> None:
         """
         Recovery is disabled by default to prevent hijack.
@@ -980,9 +973,7 @@ class PracticalPersonaService:
 
         return "INVALID"
 
-    # --------------------------
     # Topic menu from metadata (NO hallucination) + sanitation
-    # --------------------------
     # H2: Multi-query pool for richer topic menu (4 queries = broader coverage)
     _TOPIC_POOL_QUERIES = [
         "ใบอนุญาต เปิดร้านอาหาร",
@@ -1042,7 +1033,7 @@ class PracticalPersonaService:
         """
         Practical greeting/menu renderer.
 
-        ✅ FIX: If Supervisor owns menu, do NOT show menu / do NOT set pending_slot.
+        FIX: If Supervisor owns menu, do NOT show menu / do NOT set pending_slot.
         (Still returns a short prefix so the system can respond naturally.)
         """
         state.context = state.context or {}
@@ -1055,7 +1046,7 @@ class PracticalPersonaService:
         if self._supervisor_owns_menu(state):
             return self._apply_practical_lint(prefix, kind="greet")
 
-        # ✅ menu once per session
+        # menu once per session
         if state.context.get("main_menu_shown"):
             return self._apply_practical_lint(prefix, kind="greet")
 
@@ -1069,9 +1060,7 @@ class PracticalPersonaService:
         # Uses same guard in _reply_greeting_with_choices()
         return self._reply_greeting_with_choices(state, kind="thanks")
 
-    # --------------------------
     # LLM + retrieval
-    # --------------------------
     def _call_llm_json(self, prompt: str, max_retries: int = 2, state: Optional[ConversationState] = None) -> dict:
         last_err = None
         for _ in range(max_retries):
@@ -1086,7 +1075,7 @@ class PracticalPersonaService:
 
                 obj = json.loads(text)
                 
-                # ✅ DEBUG LOG: show raw LLM JSON response before processing
+                # DEBUG LOG: show raw LLM JSON response before processing
                 if isinstance(obj, dict):
                     action = obj.get("action", "?")
                     exec_data = obj.get("execution", {})
@@ -1095,7 +1084,7 @@ class PracticalPersonaService:
                 
                 return obj if isinstance(obj, dict) else {}
             except Exception as e:
-                # 🎯 ถ้า LengthFinishReasonError → retry ไม่ช่วย (input เดิม = ผลเดิม) → break ทันที
+                # ถ้า LengthFinishReasonError → retry ไม่ช่วย (input เดิม = ผลเดิม) → break ทันที
                 if "LengthFinishReasonError" in type(e).__name__ or "LengthFinishReason" in str(e)[:80]:
                     _LOG.warning("[Practical/json] LengthFinishReasonError — max_tokens น้อยเกินไป, skip retry")
                     last_err = e
@@ -1124,7 +1113,7 @@ class PracticalPersonaService:
         max_docs = max_docs if max_docs is not None else int(getattr(conf, "LLM_DOCS_MAX_PRACTICAL", 8))
         max_chars = getattr(conf, "LLM_DOC_CHARS_PRACTICAL", 700)
 
-        # 🎯 Query expansion: short/abbrev keywords → full Thai terms for better embedding match
+        # Query expansion: short/abbrev keywords → full Thai terms for better embedding match
         # e.g. "vat" alone has low cosine similarity to "ภาษีมูลค่าเพิ่ม ภพ.20"
         _EXPAND_PATTERNS = [
             (r"\bvat\b", "ภาษีมูลค่าเพิ่ม ภพ.20 จด VAT กรมสรรพากร"),
@@ -1140,7 +1129,7 @@ class PracticalPersonaService:
                 _expansions.append(expansion)
         expanded_query = (query + " " + " ".join(_expansions)).strip() if _expansions else query
         if _expansions:
-            _LOG.info("[Practical] query expanded: %r → appended %d term(s)", query[:60], len(_expansions))
+            _LOG.info("[Practical] query expanded: %r → %r", query[:50], expanded_query[:80])
 
         vectorstore = getattr(self.retriever, "vectorstore", None)
 
@@ -1169,7 +1158,8 @@ class PracticalPersonaService:
             if vectorstore is not None:
                 try:
                     docs = _scored_search(query, max_docs, metadata_filter)
-                    logger.log_with_data("info", "🔍 ค้นหาเอกสารแบบกรอง", {
+                    _flt_str = " | ".join(f"{k}={v!r}" for k, v in (metadata_filter or {}).items())
+                    logger.log_with_data("info", f"🔍 retrieve(filtered) query={query[:50]!r} filter=[{_flt_str}] found={len(docs)}", {
                         "action": "filtered_retrieval",
                         "query": query[:60],
                         "filter": str(metadata_filter),
@@ -1197,11 +1187,12 @@ class PracticalPersonaService:
             else:
                 docs = _scored_search(expanded_query, top_k)
         else:
+            _LOG.info("[Practical] retrieve(unfiltered) query=%r top_k=%d", expanded_query[:60], top_k)
             docs = _scored_search(expanded_query, top_k)
 
         retrieval_ms = (time.time() - start) * 1000
         
-        # 🎯 Token Optimization: Filter by similarity score
+        # Token Optimization: Filter by similarity score
         # เลือกเฉพาะเอกสารที่มี similarity > threshold
         min_similarity = getattr(conf, 'RETRIEVAL_MIN_SIMILARITY', 0.6)
         filtered_docs = []
@@ -1223,13 +1214,7 @@ class PracticalPersonaService:
             })
             filtered_docs = docs
         else:
-            # Log ว่ากรองออกไปกี่เอกสาร
-            logger.log_with_data("info", "🎯 กรองเอกสารตาม similarity", {
-                "before": len(docs),
-                "after": len(filtered_docs),
-                "removed": len(low_quality_docs),
-                "min_similarity": min_similarity
-            })
+            _LOG.info("[Practical] sim_filter: %d → %d docs (removed %d below %.2f)", len(docs), len(filtered_docs), len(low_quality_docs), min_similarity)
         
         docs = filtered_docs
 
@@ -1259,7 +1244,7 @@ class PracticalPersonaService:
             if topic and topic not in topics:
                 topics.append(topic)
         
-        # 🎯 Token: filter + cap metadata at retrieval time — prevents raw metadata accumulating in state
+        # Token: filter + cap metadata at retrieval time — prevents raw metadata accumulating in state
         _STORE_META_WHITELIST = frozenset({
             "license_type", "operation_topic",
             "entity_type_normalized", "registration_type", "department",
@@ -1292,65 +1277,45 @@ class PracticalPersonaService:
                 {"content": (getattr(d, "page_content", "") or "")[:max_chars], "metadata": slim_md}
             )
 
-        # ✅ Enhanced RAG metrics logging for AI Engineers
-        logger.log_with_data("info", "📚 RAG Retrieval สำเร็จ", {
-            "action": "rag_retrieval",
-            "query": query[:60],
-            "query_length": len(query),
-            "docs_retrieved": len(results),
-            "max_docs": max_docs,
-            "retrieval_time_ms": round(retrieval_ms, 2),
-            "avg_similarity": round(sum(scores) / len(scores), 3) if scores else None,
-            "min_similarity": round(min(scores), 3) if scores else None,
-            "max_similarity": round(max(scores), 3) if scores else None,
-            "top_topics": topics[:3],
-            "has_filter": metadata_filter is not None,
-            "persona": "practical"
-        })
-        
-        # ⚠️ Quality warnings for AI Engineers
+        _sim_summary = f"max={max(scores):.3f} min={min(scores):.3f} avg={sum(scores)/len(scores):.3f}" if scores else "no scores"
+        _LOG.info("[Practical] retrieve done | docs=%d/%d time=%.0fms %s", len(results), max_docs, retrieval_ms, _sim_summary)
+
         if len(results) == 0:
-            logger.log_with_data("warning", "⚠️ ไม่พบเอกสารที่เกี่ยวข้อง", {
-                "query": query[:100],
-                "filter": str(metadata_filter) if metadata_filter else None,
-                "risk": "อาจตอบไม่ถูกต้องหรือ hallucinate",
-                "suggestion": "ตรวจสอบ vector database หรือปรับ query"
-            })
+            _LOG.warning("[Practical] ⚠️ ไม่พบเอกสาร query=%r filter=%s", query[:80], metadata_filter)
         elif scores and max(scores) < 0.5:
-            logger.log_with_data("warning", "⚠️ ความเกี่ยวข้องต่ำ", {
-                "query": query[:60],
-                "max_similarity": round(max(scores), 3),
-                "threshold": 0.5,
-                "risk": "คำตอบอาจไม่แม่นยำ"
-            })
+            _LOG.warning("[Practical] ⚠️ low similarity max=%.3f query=%r", max(scores), query[:60])
         
-        # Log รายละเอียดแต่ละเอกสาร (info level เพื่อให้เห็นใน terminal)
+        # Log รายละเอียดแต่ละเอกสาร
+        _top_topics: list = []
+        _license_counts: dict = {}
         for i, r in enumerate(results):
             md = r.get("metadata", {}) or {}
             topic = md.get("operation_topic") or md.get("topic") or md.get("filename") or "?"
             etype = md.get("entity_type_normalized") or md.get("entity_type") or ""
             dept = md.get("department") or ""
             license_t = md.get("license_type") or ""
+            reg_t = md.get("registration_type") or ""
             sim = scores[i] if i < len(scores) else None
             sim_str = f"{sim:.3f}" if sim is not None else "n/a"
-            snippet = (r.get("content", "") or "")[:60].replace("\n", " ")
 
-            logger.log_with_data("info", f"📄 Doc[{i+1}/{len(results)}] topic={topic!r} entity={etype!r} sim={sim_str}", {
-                "doc_index": i + 1,
-                "total_docs": len(results),
-                "topic": topic,
-                "department": dept,
-                "license_type": license_t,
-                "entity_type": etype,
-                "similarity": sim,
-                "snippet": snippet,
-            })
+            _parts = [f"sim={sim_str}", f"license={license_t!r}"]
+            if etype: _parts.append(f"entity={etype!r}")
+            if dept: _parts.append(f"dept={dept!r}")
+            if reg_t: _parts.append(f"reg={reg_t!r}")
+
+            _LOG.info("[Practical] doc[%d/%d] topic=%r | %s", i + 1, len(results), topic, " ".join(_parts))
+            _top_topics.append(topic)
+            if license_t:
+                _license_counts[license_t] = _license_counts.get(license_t, 0) + 1
+
+        _LOG.info("[Practical] retrieved_topics=%s", _top_topics)
+        if _license_counts:
+            _breakdown = " | ".join(f"{lt}={n}" for lt, n in sorted(_license_counts.items(), key=lambda x: -x[1]))
+            _LOG.info("[Practical] license_breakdown: %s", _breakdown)
 
         return results
 
-    # --------------------------
     # Topic Registry (auto-discovery from Chroma, no hardcoding)
-    # --------------------------
     def _build_topic_registry(self) -> List[str]:
         """Read all unique operation_topic values from the Chroma collection.
         This is the source-of-truth registry — auto-updates when data is re-ingested."""
@@ -1437,9 +1402,7 @@ class PracticalPersonaService:
         except Exception:
             pass
 
-    # --------------------------
     # Phase 3 helpers
-    # --------------------------
     def _extract_available_phase3_sections(self, docs: List[Dict[str, Any]]) -> List[str]:
         """Return list of canonical section labels that exist in the retrieved docs."""
         available: List[str] = []
@@ -1507,9 +1470,7 @@ class PracticalPersonaService:
             lines.append(f"{i}) {opt}")
         return "\n".join(lines), options
 
-    # --------------------------
     # ENTRYPOINT
-    # --------------------------
     def handle(self, state: ConversationState, user_input: str, _internal: bool = False) -> Tuple[ConversationState, str]:
         state.context = state.context or {}
         state.persona_id = self.persona_id
@@ -1523,7 +1484,7 @@ class PracticalPersonaService:
         elif user_text == "__auto_post_retrieve__":
             state.context[auto_internal_guard_key] = int(state.context.get(auto_internal_guard_key, 0) or 0) + 1
 
-        # ✅ recovery only in non-internal, owner-gated (already inside the function)
+        # recovery only in non-internal, owner-gated (already inside the function)
         if not _internal:
             self._maybe_recover_pending_slot_from_last_bot(state, user_text)
 
@@ -1534,7 +1495,7 @@ class PracticalPersonaService:
         if (not _internal) and isinstance((state.context or {}).get("pending_slot"), dict):
             pending_key_before = (state.context.get("pending_slot") or {}).get("key")
 
-        # ✅ ALWAYS allow pending_slot consumption (this is the core requirement)
+        # ALWAYS allow pending_slot consumption (this is the core requirement)
         if (not _internal) and user_text:
             pending_status = self._consume_pending_slot_from_user(state, user_text)
 
@@ -1574,9 +1535,7 @@ class PracticalPersonaService:
                     state.round = int(getattr(state, "round", 0) or 0) + 1
                     return state, msg
 
-        # --------------------------
         # Supervisor-owned menu: do not render greeting/menu here
-        # --------------------------
         if (not _internal) and self._supervisor_owns_menu(state):
             # Still allow satisfaction to be treated as normal text flow; no menu injection.
             pass
@@ -1595,7 +1554,7 @@ class PracticalPersonaService:
                 state.round = int(getattr(state, "round", 0) or 0) + 1
                 return state, msg
 
-        # ✅ DEDUPE: only append once
+        # DEDUPE: only append once
         if not _internal:
             self._append_user_once(state, user_input)
 
@@ -1724,6 +1683,12 @@ class PracticalPersonaService:
                 if k == "research_reference":
                     continue
                 v_str = str(v)
+                # Flatten all internal newlines in field values to a single space.
+                # Source data (Google Sheet) may contain line breaks mid-word or mid-sentence
+                # (e.g. "(ภ.อ.\n11)", "ไ\nปติดแถบ"). The LLM re-formats numbered items
+                # from inline markers (1., 2., 3.) so list structure is preserved.
+                v_str = re.sub(r"[\r\n]+", " ", v_str)
+                v_str = re.sub(r"[ \t]+", " ", v_str).strip()
                 cap = _FIELD_CAPS.get(k)
                 if cap and len(v_str) > cap:
                     v_str = v_str[:cap]
@@ -1744,12 +1709,15 @@ class PracticalPersonaService:
             return f"- {url or desc}"
 
         # Links: inject ตาม intent ของ user เท่านั้น ไม่ inject ทุก section ตลอดเวลา
+        # When user fills a slot (e.g. "1"), user_text is short — fall back to last_user_legal_query
+        # so that link-intent from the original question is preserved through slot collection.
+        _intent_text = (user_text or "") + " " + str((state.context or {}).get("last_user_legal_query") or "")
         _user_wants_links = bool(re.search(
             r"(ขอลิงค์|ขอลิงก์|ส่งลิงค์|ส่งลิงก์|ลิงค์คู่มือ|ลิงก์คู่มือ"
             r"|ขอดูลิงค์|ขอดูลิงก์|URL|ดาวน์โหลด"
             r"|ขอคู่มือ|ขอดูคู่มือ|ส่งคู่มือ|คู่มือ(การ|สำหรับ|ของ)"
             r"|ขอแบบฟอร์ม|ส่งแบบฟอร์ม)",
-            user_text or "", re.IGNORECASE,
+            _intent_text, re.IGNORECASE,
         ))
         # Service/registration links: เฉพาะตอน user ถามเรื่องการสมัคร/ลงทะเบียน
         _user_wants_registration = bool(re.search(
@@ -1758,14 +1726,14 @@ class PracticalPersonaService:
             r"|ลิ้งค์.{0,6}(สมัคร|ลงทะเบียน|กรอก|ไฟล์|API|form)"
             r"|ลิงค์.{0,6}(สมัคร|ลงทะเบียน|กรอก|ไฟล์|API|form)"
             r"|link.{0,6}(register|apply|form|sign.?up))",
-            user_text or "", re.IGNORECASE,
+            _intent_text, re.IGNORECASE,
         ))
         # Form links: เฉพาะตอน user ถามเรื่องเอกสาร/แบบฟอร์ม
         _user_wants_forms = bool(re.search(
             r"(แบบฟอร์ม|เอกสาร.{0,8}(ใช้|ที่ต้อง|ต้องใช้)|ต้องใช้.{0,8}เอกสาร"
             r"|ลิ้งค์.{0,6}(เอกสาร|ฟอร์ม|คำขอ)"
             r"|link.{0,6}(document|form|template))",
-            user_text or "", re.IGNORECASE,
+            _intent_text, re.IGNORECASE,
         ))
 
         _link_section = ""
@@ -1865,7 +1833,7 @@ ROUND: {int(getattr(state, "round", 0) or 0)}/{int(getattr(conf, "MAX_ROUNDS", 7
 Your JSON response:
 """
 
-        # ⚡ SHORT-CIRCUIT: when topic_slot_queue is non-empty and docs are loaded,
+        # SHORT-CIRCUIT: when topic_slot_queue is non-empty and docs are loaded,
         # the next action is always 'ask' — skip the LLM entirely.
         # The question text and slot options come from the queue entry (not the LLM),
         # so calling the LLM here wastes tokens without changing the outcome.
@@ -1949,7 +1917,7 @@ Your JSON response:
 
             pending = state.context.get("pending_slot")
 
-            # ✅ DYNAMIC SLOT QUEUE: pop next slot from topic_slot_queue (set by Supervisor)
+            # DYNAMIC SLOT QUEUE: pop next slot from topic_slot_queue (set by Supervisor)
             # Each entry is {"key": "entity_type"|"shop_area_type"|…, "options": [...], "question": "..."}
             # This replaces all hardcoded topic_registration_types / topic_area_types logic.
             _slot_queue = (state.context or {}).get("topic_slot_queue")
@@ -2050,10 +2018,10 @@ Your JSON response:
                     slot_key = self._infer_slot_key_from_question(question, options=parsed_opts)
                     allow_multi = True if slot_key == self._PHASE3_SLOT_KEY else False
 
-                    # ── AUTO-FILL: if this slot was already answered in an earlier topic,
-                    #    skip re-asking and silently fill it from cross-topic memory.
-                    #    Only applies to "identity" slots (entity_type, registration_type)
-                    #    — NOT area_size / location_scope which are topic-specific. ────────
+                    # AUTO-FILL: if this slot was already answered in an earlier topic,
+                    # skip re-asking and silently fill it from cross-topic memory.
+                    # Only applies to "identity" slots (entity_type, registration_type)
+                    # NOT area_size / location_scope which are topic-specific. 
                     _AUTOFILL_SLOTS = {"entity_type", "registration_type"}
                     _already_known = (
                         state.get_collected_slot(slot_key)
@@ -2073,7 +2041,7 @@ Your JSON response:
                         _result = self.handle(state, _already_known, _internal=True)
                         state.context.pop("_autofill_guard", None)
                         return _result
-                    # ── END AUTO-FILL ────────────────────────────────────────────────────
+                    # END AUTO-FILL 
 
                     state.context["pending_slot"] = {"key": slot_key, "options": parsed_opts, "allow_multi": allow_multi}
 

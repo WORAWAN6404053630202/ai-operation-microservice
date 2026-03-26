@@ -61,7 +61,7 @@ except ImportError:
     logger = _ROOT_LOG
     _STRUCTURED_LOG = False
 
-# 🎯 Token Management: ลด threshold เพื่อ trim history เร็วขึ้น
+# Token Management: ลด threshold เพื่อ trim history เร็วขึ้น
 # เดิม: 50,000 tokens (ยอมให้ใช้เยอะมาก)
 # ใหม่: 8,000 tokens (เตือนเมื่อใช้เกิน → trim ทันที)
 _TOKEN_WARN_THRESHOLD = 8_000  # warn when session total exceeds this
@@ -123,7 +123,7 @@ def _check_token_budget(total: int, model: str) -> None:
         )
 
 
-# 💰 Cost Estimation (ราคาโดยประมาณ - ตรวจสอบราคาจริงจาก OpenRouter)
+# Cost Estimation (ราคาโดยประมาณ - ตรวจสอบราคาจริงจาก OpenRouter)
 PRICING_USD_PER_MILLION_TOKENS = {
     "anthropic/claude-sonnet-4": {"input": 3.00, "output": 15.00},
     "anthropic/claude-4-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
@@ -281,13 +281,13 @@ def llm_invoke(
 
     total_call = prompt_tokens + completion_tokens
     
-    # 💰 Calculate cost
+    # Calculate cost
     cost_usd = estimate_cost(model_name, prompt_tokens, completion_tokens)
     
-    # 📊 Check token budget and log warnings
+    # heck token budget and log warnings
     _check_token_budget(total_call, model_name)
     
-    # ✅ Enhanced structured logging for AI Engineers
+    # Enhanced structured logging for AI Engineers
     if _STRUCTURED_LOG:
         _safe_log_with_data(log, "info", f"🤖 {label} สำเร็จ", {
             "action": "llm_call",
@@ -304,7 +304,7 @@ def llm_invoke(
             "temperature": getattr(llm, "temperature", None),
         })
         
-        # ⚠️ Performance warning
+        # Performance warning
         if elapsed > 2.0:
             _safe_log_with_data(log, "warning", "🐌 LLM ช้าเกินไป", {
                 "label": label,

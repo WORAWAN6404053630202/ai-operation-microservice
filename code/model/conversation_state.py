@@ -6,13 +6,13 @@ Single source of truth for conversation lifecycle.
 This model is intentionally logic-light and framework-agnostic.
 
 Production stability improvements:
-- ✅ Single source-of-truth for retrieval tracking: state.last_retrieval_query (+ optional cached mirror in context)
-- ✅ Explicit conversation locks in context (supervisor-level policy can rely on these)
-- ✅ Append-only + dedupe helpers: add_user_message_once / add_assistant_message_once
-- ✅ FIX: dedup now compares stripped content (prevents whitespace duplicates)
-- ✅ NEW: cross-persona slot memory (collected_slots) — saves answers across Practical → Academic
-- ✅ NEW: token usage tracking (total_prompt_tokens / total_completion_tokens)
-- ✅ NEW: trim_messages() — keeps last N messages to prevent unbounded growth
+-  Single source-of-truth for retrieval tracking: state.last_retrieval_query (+ optional cached mirror in context)
+-  Explicit conversation locks in context (supervisor-level policy can rely on these)
+-  Append-only + dedupe helpers: add_user_message_once / add_assistant_message_once
+-  FIX: dedup now compares stripped content (prevents whitespace duplicates)
+-  NEW: cross-persona slot memory (collected_slots) — saves answers across Practical → Academic
+-  NEW: token usage tracking (total_prompt_tokens / total_completion_tokens)
+-  NEW: trim_messages() — keeps last N messages to prevent unbounded growth
 """
 
 from __future__ import annotations
@@ -39,14 +39,10 @@ class ConversationState(BaseModel):
         extra="allow",
     )
 
-    # ------------------------------------------------------------------
     # Identity
-    # ------------------------------------------------------------------
     session_id: str = Field(default="", description="Conversation session identifier")
 
-    # ------------------------------------------------------------------
     # Persona & behavior
-    # ------------------------------------------------------------------
     persona_id: str = Field(default="practical", description="Active persona id (academic / practical)")
 
     strict_profile: Dict[str, Any] = Field(
@@ -60,44 +56,30 @@ class ConversationState(BaseModel):
         description="Effective behavior knobs derived from persona",
     )
 
-    # ------------------------------------------------------------------
     # Conversation history
-    # ------------------------------------------------------------------
     messages: List[Dict[str, Any]] = Field(default_factory=list, description="User-visible chat history")
     internal_messages: List[Dict[str, Any]] = Field(default_factory=list, description="Internal system / agent traces (hidden from user)")
 
-    # ------------------------------------------------------------------
     # Context & memory
-    # ------------------------------------------------------------------
     context: Dict[str, Any] = Field(default_factory=dict, description="Structured context memory (facts, slots, flags)")
     requirements: Dict[str, Any] = Field(default_factory=dict, description="Latest requirements inferred by LLM (optional)")
 
-    # ------------------------------------------------------------------
     # RAG
-    # ------------------------------------------------------------------
     current_docs: List[Dict[str, Any]] = Field(default_factory=list, description="Documents retrieved for current turn (RAG)")
 
-    # ------------------------------------------------------------------
     # Retrieval tracking (deterministic guardrails)
-    # ------------------------------------------------------------------
     last_retrieval_query: Optional[str] = Field(default=None, description="Last retrieval query used (source-of-truth)")
     last_retrieval_topic: Optional[str] = Field(default=None, description="Optional last topic label (if available)")
 
-    # ------------------------------------------------------------------
     # Token budget tracking (L2: cost observability)
-    # ------------------------------------------------------------------
     total_prompt_tokens: int = Field(default=0, description="Cumulative prompt tokens used in this session")
     total_completion_tokens: int = Field(default=0, description="Cumulative completion tokens used in this session")
 
-    # ------------------------------------------------------------------
     # Control & debug
-    # ------------------------------------------------------------------
     round: int = Field(default=0, description="Current multi-step round counter")
     last_action: Optional[str] = Field(default=None, description="Last high-level action taken by agent (ask / retrieve / answer)")
 
-    # ------------------------------------------------------------------
     # Helpers (NO business logic)
-    # ------------------------------------------------------------------
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
 
@@ -132,9 +114,7 @@ class ConversationState(BaseModel):
             msg["meta"] = meta
         self.internal_messages.append(msg)
 
-    # --------------------------
     # Locks (explicit supervisor contract)
-    # --------------------------
     def set_persona_lock(self, persona_id: Optional[str]) -> None:
         self.context = self.context or {}
         if persona_id and isinstance(persona_id, str) and persona_id.strip():
@@ -147,9 +127,7 @@ class ConversationState(BaseModel):
         v = self.context.get("lock_persona")
         return str(v).strip() if isinstance(v, str) and str(v).strip() else None
 
-    # --------------------------
     # Retrieval tracking helpers
-    # --------------------------
     def set_last_retrieval_query(self, query: Optional[str], cache_to_context: bool = True) -> None:
         q = (query or "").strip() if query is not None else None
         self.last_retrieval_query = q if q else None
@@ -171,10 +149,8 @@ class ConversationState(BaseModel):
             return v.strip()
         return None
 
-    # --------------------------
     # Cross-persona slot memory (NEW)
     # Allows Practical persona answers to be remembered when entering Academic
-    # --------------------------
     def save_collected_slot(self, key: str, value: str) -> None:
         """Save a user-provided slot value, shared across personas."""
         self.context = self.context or {}
@@ -204,9 +180,7 @@ class ConversationState(BaseModel):
         """Return a single slot value, or None if not collected yet."""
         return self.get_collected_slots().get(str(key).strip())
 
-    # --------------------------
     # Token budget tracking (NEW)
-    # --------------------------
     def add_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
         """Accumulate token usage across all LLM calls in this session."""
         self.total_prompt_tokens += max(0, int(prompt_tokens or 0))
@@ -216,9 +190,7 @@ class ConversationState(BaseModel):
     def total_tokens(self) -> int:
         return self.total_prompt_tokens + self.total_completion_tokens
 
-    # --------------------------
     # State trimming (NEW)
-    # --------------------------
     def trim_messages(self, keep_last: int = 8) -> None:
         """
         Keep only the last N messages to prevent unbounded memory growth.
@@ -270,9 +242,7 @@ class ConversationState(BaseModel):
         # เก็บ system messages + summary + recent messages
         self.messages = system_msgs + [summary_msg] + recent_messages
 
-    # --------------------------
     # Round / docs helpers
-    # --------------------------
     def reset_round(self) -> None:
         self.round = 0
 

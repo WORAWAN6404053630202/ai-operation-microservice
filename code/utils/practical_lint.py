@@ -6,9 +6,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 
-# ============================================================
 # Configuration
-# ============================================================
 
 @dataclass(frozen=True)
 class PracticalPolicyConfig:
@@ -102,9 +100,7 @@ class PracticalPolicyConfig:
 DEFAULT_POLICY = PracticalPolicyConfig()
 
 
-# ============================================================
 # Quote helpers
-# ============================================================
 
 def _is_quote_line(line: str) -> bool:
     """
@@ -122,9 +118,7 @@ def _non_quote_text(text: str) -> str:
     return "\n".join(kept).strip()
 
 
-# ============================================================
 # Issue detection
-# ============================================================
 
 def _normalize(text: str) -> str:
     t = (text or "").strip()
@@ -141,7 +135,7 @@ def _count_bullets(lines: List[str]) -> int:
     return sum(1 for ln in lines if ln.startswith(("-", "•", "*")))
 
 
-# ---- Multi-question heuristics (NEW) ----
+# Multi-question heuristics 
 _Q_ENDING_RE = re.compile(r"(ไหม|หรือไม่|หรือเปล่า)\s*$", re.IGNORECASE)
 _Q_MARK_RE = re.compile(r"\?", re.IGNORECASE)
 _Q_PREFIX_RE = re.compile(r"^\s*(ถาม|คำถาม)\s*[:：]", re.IGNORECASE)
@@ -300,10 +294,7 @@ def analyze_practical_text(text: str, cfg: PracticalPolicyConfig = DEFAULT_POLIC
     return issues
 
 
-# ============================================================
 # Deterministic fallback helpers
-# ============================================================
-
 def _trim_to_policy(text: str, cfg: PracticalPolicyConfig) -> str:
     """
     Deterministic trimming to comply with max_lines/max_bullets/max_chars.
@@ -364,9 +355,7 @@ def _hard_remove_forbidden_lines(text: str, cfg: PracticalPolicyConfig) -> str:
     return "\n".join(kept).strip()
 
 
-# ============================================================
 # Rewrite prompt (embedded here to keep this file standalone)
-# ============================================================
 
 def build_rewrite_prompt(text: str, cfg: PracticalPolicyConfig) -> str:
     banned = ", ".join(cfg.forbidden_phrases)
@@ -399,9 +388,7 @@ def build_rewrite_prompt(text: str, cfg: PracticalPolicyConfig) -> str:
 """.strip()
 
 
-# ============================================================
 # Main enforcement API
-# ============================================================
 
 RewriteFn = Callable[[str], str]
 

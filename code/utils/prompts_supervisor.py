@@ -21,9 +21,7 @@ from __future__ import annotations
 from typing import List
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # 1. TOPIC PICKER
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_topic_picker_prompt(
     last_hint: str,
@@ -52,9 +50,7 @@ def build_topic_picker_prompt(
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # 2. CONFIRM (yes / no)
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_confirm_prompt(user_text: str) -> str:
     """Interpret whether user is confirming, rejecting, or ambiguous."""
@@ -70,9 +66,7 @@ def build_confirm_prompt(user_text: str) -> str:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # 3. STYLE DETECT (long / short)
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_style_detect_prompt(user_text: str) -> str:
     """Detect whether user explicitly wants a long/detailed or short/concise answer."""
@@ -90,9 +84,7 @@ def build_style_detect_prompt(user_text: str) -> str:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # 4. GREET PREFIX
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_greet_prefix_prompt(
     kind: str,
@@ -143,9 +135,8 @@ def build_greet_kind_instructions(kind: str, last_topic_hint: str) -> str:
     return "- ทักทายอย่างอบอุ่น\n"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+
 # 5. OP GROUP CLASSIFIER
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_op_group_classifier_prompt(license_type: str, raw_ops: List[str]) -> str:
     """Group raw operation values from ChromaDB into human-readable categories."""
@@ -172,9 +163,8 @@ def build_op_group_classifier_prompt(license_type: str, raw_ops: List[str]) -> s
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+
 # 6. DEDUPLICATE OPTIONS
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_deduplicate_options_prompt(options: List[str]) -> str:
     """Remove semantically duplicate entries from a list of slot options."""
@@ -194,9 +184,7 @@ def build_deduplicate_options_prompt(options: List[str]) -> str:
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # 7. SLOT MAPPER
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_slot_mapper_prompt(slot_key: str, user_text: str, options: List[str]) -> str:
     """Map a free-text reply to the closest matching pending-slot option."""
@@ -215,9 +203,7 @@ def build_slot_mapper_prompt(slot_key: str, user_text: str, options: List[str]) 
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # 8. FALLBACK INTENT
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_fallback_intent_prompt(user_text: str, last_query: str, persona: str) -> str:
     """Classify intent when no deterministic routing rule matched."""
@@ -242,9 +228,7 @@ def build_fallback_intent_prompt(user_text: str, last_query: str, persona: str) 
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # 9. TYPO CHECK
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_typo_check_prompt(user_text: str, last_topic: str) -> str:
     """Detect whether input is garbled/accidental or has genuine intent."""
@@ -266,10 +250,7 @@ def build_typo_check_prompt(user_text: str, last_topic: str) -> str:
         "- suggested: ถ้า is_typo=true แต่พอเดาได้ว่าหมายถึงอะไร ใส่คำนั้น ไม่งั้นเว้นว่าง"
     )
 
-
-# ──────────────────────────────────────────────────────────────────────────────
 # 10. TOPIC DESC
-# ──────────────────────────────────────────────────────────────────────────────
 
 def build_topic_desc_prompt(topics: List[str], context_block: str) -> str:
     """Generate one-sentence descriptions for topic menu items."""

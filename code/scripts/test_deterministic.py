@@ -15,9 +15,7 @@ from model.persona_supervisor import PersonaSupervisor
 from service.data_loader import DataLoader
 
 
-# ----------------------------
 # Fake Document + Retriever
-# ----------------------------
 @dataclass
 class FakeDoc:
     page_content: str
@@ -74,9 +72,7 @@ class FakeRetriever:
         ]
 
 
-# ----------------------------
 # Tiny test harness
-# ----------------------------
 def _assert(cond: bool, msg: str):
     if not cond:
         raise AssertionError(msg)
@@ -99,9 +95,7 @@ def _new_state(persona_id: str = "practical") -> ConversationState:
     )
 
 
-# ============================================================
 # TEST 1: Style switch (deterministic path)
-# ============================================================
 def test_01_style_switch_policy_persona_aware():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -120,9 +114,7 @@ def test_01_style_switch_policy_persona_aware():
     _assert(st2.context.get("pending_persona") == "practical", "T1b: should target practical")
 
 
-# ============================================================
 # TEST 2: Confirmation classifier robustness
-# ============================================================
 def test_02_confirmation_slang_yes_no():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -148,9 +140,7 @@ def test_02_confirmation_slang_yes_no():
     _assert(st2.persona_id == "practical", "T2b: filler must NOT switch")
 
 
-# ============================================================
 # TEST 3: Greeting must NOT retrieve
-# ============================================================
 def test_03_greeting_no_retrieve():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -163,9 +153,7 @@ def test_03_greeting_no_retrieve():
     _assert(len(retriever.queries) == 0, "T3: greeting must not trigger retrieval")
 
 
-# ============================================================
 # TEST 4: Practical new legal question bypass pending_slot
-# ============================================================
 def test_04_practical_bypass_pending_slot():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -181,9 +169,7 @@ def test_04_practical_bypass_pending_slot():
     _assert("ประกันสังคม" in retriever.queries[-1], "T4: query must reflect new topic")
 
 
-# ============================================================
 # TEST 5: Academic intake must override greeting
-# ============================================================
 def test_05_academic_intake_lock():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -198,9 +184,7 @@ def test_05_academic_intake_lock():
     _assert("ข้อมูลจำเป็น" in reply or "ที่ตั้งร้าน" in reply, "T5: greeting must NOT override intake")
 
 
-# ============================================================
 # TEST 6: Academic auto-return to practical
-# ============================================================
 def test_06_academic_auto_return():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -222,9 +206,7 @@ def test_06_academic_auto_return():
     _assert("1)" in reply, "T6: practical menu must appear")
 
 
-# ============================================================
 # TEST 7: No mutation rule (append-only)
-# ============================================================
 def test_07_no_mutation_rule():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -241,9 +223,7 @@ def test_07_no_mutation_rule():
     _assert(second_len > first_len, "T7: messages must be append-only")
 
 
-# ============================================================
 # TEST 8: Retrieval reuse vs new topic detection
-# ============================================================
 def test_08_retrieval_reuse():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -260,9 +240,7 @@ def test_08_retrieval_reuse():
     _assert(q1 == q2 or len(retriever.queries) <= 2, "T8: must reuse or controlled retrieve")
 
 
-# ============================================================
 # TEST 9: Academic resume without confirm
-# ============================================================
 def test_09_academic_resume_layer():
     retriever = FakeRetriever()
     sup = PersonaSupervisor(retriever=retriever)
@@ -277,9 +255,7 @@ def test_09_academic_resume_layer():
     _assert("ค่าธรรมเนียม" in reply or len(st.current_docs) >= 0, "T9: must stay in academic")
 
 
-# ----------------------------
 # Runner
-# ----------------------------
 TESTS = [
     test_01_style_switch_policy_persona_aware,
     test_02_confirmation_slang_yes_no,
