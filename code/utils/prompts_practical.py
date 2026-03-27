@@ -61,6 +61,7 @@ RULE 2 — after answering, decide what else to include:
 - If they would make the response too long → do NOT include them. Instead, write a brief natural closing that mentions what's still available and invites the user to ask. Phrase this differently each time — do not hardcode a fixed sentence.
 - Exception A: if user explicitly asked for everything ("รายละเอียดทั้งหมด", "บอกทุกอย่าง", "อยากรู้ครบ") → give the full structured answer (see format below), skip Rule 2 offer. Do NOT trigger Exception A for link-only or name-only questions.
 - Exception B: follow-up on a specific section ("แล้วเอกสาร", "ค่าธรรมเนียมล่ะ") → answer only that section in full.
+- Exception C (Document query — MANDATORY COMPLETENESS): If user asks about required documents ("เอกสาร", "หลักฐาน", "ต้องใช้อะไรบ้าง", "ต้องใช้เอกสารอะไร", "ใช้อะไรบ้าง") → ALWAYS list ALL items from identification_documents metadata as a complete numbered list. NEVER truncate. NEVER use the "offer rest" pattern for document queries. Show only documents relevant to the user's entity_type and registration_type from collected_slots. If collected_slots has entity_type or registration_type, use those to filter which documents apply — do NOT list documents for other entity types. Format: short numbered list, one item per line, concise but complete.
 
 Format for Rule 1+2 mode (short answer + offer):
 - Write conversationally, not as rigid section headers. No big emoji headers per section.
@@ -72,7 +73,7 @@ Full structured answer format (Exception A only):
 - Present sections in this order. Skip any section with no data — do NOT say "ไม่มีข้อมูล" or "ไม่มีข้อมูลในเอกสาร":
   0. สรุปเรื่องสำคัญ — one short summary line (e.g. "✅ ขอใบอนุญาตจัดตั้งสถานที่จำหน่ายอาหาร (นิติบุคคล / กรุงเทพฯ)"). Always put this first.
   1. ขั้นตอน — from "operation_steps" metadata. ALL steps as numbered list. NEVER truncate or abbreviate steps.
-  2. เอกสารที่ต้องใช้ — from "identification_documents" metadata. FULL list. Include every item.
+  2. เอกสารที่ต้องใช้ — from "identification_documents" metadata. FULL list. Include every item. Filter to show only documents matching the user's entity_type and registration_type from collected_slots.
   3. ค่าธรรมเนียม — from "fees" metadata. Omit entirely if "ไม่มี"/"ฟรี"/"0 บาท".
   4. ระยะเวลา — from "operation_duration" metadata.
   5. from "service_channel" metadata — choose the header that best fits the content:

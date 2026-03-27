@@ -1257,7 +1257,7 @@ class PracticalPersonaService:
         _STORE_FIELD_CAPS = {
             # Must be >= the per-field caps used in the handle() prompt loop below,
             # otherwise the storage cut dominates and the prompt cap has no effect.
-            "operation_steps": 1000, "identification_documents": 700,
+            "operation_steps": 1000, "identification_documents": 1500,
             "research_reference": 3100, "fees": 500, "service_channel": 500,
             "legal_regulatory": 2000, "terms_and_conditions": 800,
         }
@@ -1608,7 +1608,7 @@ class PracticalPersonaService:
         _prompt_max_docs = int(getattr(conf, "LLM_DOCS_MAX_PRACTICAL", 3))
         _FIELD_CAPS = {
             "operation_steps": 1000,
-            "identification_documents": 700,
+            "identification_documents": 1500,
             "research_reference": 3100,
             "fees": 500,
             "operation_duration": 200,
@@ -1616,7 +1616,7 @@ class PracticalPersonaService:
             "legal_regulatory": 2000,      # บทลงโทษ — ข้อมูลจริงยาว ~2000 chars
             "terms_and_conditions": 800,   # เงื่อนไขผู้ประกอบการ
         }
-        _LONG_FIELDS_DEDUP = {"operation_steps", "identification_documents"}
+        _LONG_FIELDS_DEDUP = {"operation_steps"}  # identification_documents varies by entity_type — never dedup
 
         # Cap docs sent to LLM: _prompt_max_docs per license_type to control token usage.
         # For multi-license, each license still gets its own metadata via dedup logic below.

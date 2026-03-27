@@ -1077,9 +1077,12 @@ class AcademicPersonaService:
             "terms_and_conditions": 400, "conditions": 400,
             "legal_regulatory": 600, "law": 400, "regulation": 400,
             "service_channel": 300, "service_hours": 150, "service_location": 150,
+            "identification_documents": 1500,  # never truncate doc lists
         }
         # Long fields: send once (first doc that has them) to avoid ×N repetition
-        _ACADEMIC_LONG_FIELDS = {"operation_steps", "identification_documents"}
+        # identification_documents is intentionally excluded — it varies by entity_type and must
+        # come from every matching doc so the complete list reaches the LLM.
+        _ACADEMIC_LONG_FIELDS = {"operation_steps"}
         _academic_long_sent = False
         docs_json = []
         for d in (state.current_docs or [])[:_MAX_DOCS_ACADEMIC]:

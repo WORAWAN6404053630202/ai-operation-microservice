@@ -296,6 +296,31 @@ class PersonaSupervisor:
         r"ยกเลิก\s*(การจด|ภาษี|vat|ภพ|ทะเบียน)|เลิก\s*กิจการ|ปิด\s*กิจการ|จะ\s*ยกเลิก",
         re.IGNORECASE,
     )
+    # Renewal / expiry inference: "ต่ออายุ", "มีอายุกี่ปี", "หมดอายุ" etc.
+    _OP_INFER_RENEW_RE = re.compile(
+        r"ต่ออายุ|ต้องต่อ(?:\s*ใบ|\s*อนุญาต|\s*ทะเบียน)?|ต่อ\s*ใบอนุญาต|ต่อ\s*ทะเบียน"
+        r"|(?:ใบ|อนุญาต|ทะเบียน|ภาษี).{0,20}(?:มีอายุ|อายุ.{0,15}กี่|หมดอายุ|สิ้นอายุ)"
+        r"|มีอายุ(?:\s*กี่|\s*ปี|\s*เดือน|\s*วัน)?|หมดอายุ|สิ้นอายุ|วันหมดอายุ",
+        re.IGNORECASE,
+    )
+    # Universal-fact query: answer does NOT differ by entity_type.
+    # e.g. "อายุใบทะเบียนพาณิชย์ มีอายุกี่ปี" → same answer for บุคคลธรรมดา and นิติบุคคล.
+    # Matched queries skip entity_type / registration_type slot questions.
+    _UNIVERSAL_FACT_RE = re.compile(
+        r"มีอายุ|หมดอายุ|สิ้นอายุ|วันหมดอายุ"
+        r"|ต้องต่ออายุ(?:\s*ไหม|\s*หรือเปล่า|\s*หรือไม่)?"
+        r"|(?:ใบ|อนุญาต|ทะเบียน|ภาษี).{0,20}(?:อายุ.{0,15}กี่|มีอายุ|หมดอายุ)",
+        re.IGNORECASE,
+    )
+    # Entity type explicit in query text — used for auto-inference without asking
+    _ENTITY_NITI_RE = re.compile(
+        r"นิติบุคคล|บริษัท(?:\s*จำกัด|\s*มหาชน)?|ห้างหุ้นส่วน(?:\s*จำกัด|\s*สามัญ)?",
+        re.IGNORECASE,
+    )
+    _ENTITY_NATURAL_RE = re.compile(
+        r"บุคคลธรรมดา|ร้านค้าทั่วไป|เจ้าของ\s*คนเดียว",
+        re.IGNORECASE,
+    )
 
     # Slot question strings — defined once, reused everywhere
     _Q_OPERATION_GROUP = "ต้องการดำเนินการเรื่องใดครับ?"
@@ -1245,7 +1270,7 @@ class PersonaSupervisor:
                         "operation_steps", "identification_documents", "research_reference",
                     })
                     _SUPERVISOR_FC_MT = {
-                        "operation_steps": 600, "identification_documents": 700,
+                        "operation_steps": 600, "identification_documents": 1500,
                         "research_reference": 3200, "fees": 120, "service_channel": 200,
                     }
                     _merged: List[Dict] = []
@@ -1304,9 +1329,10 @@ class PersonaSupervisor:
                                 "license_type", "operation_topic", "chunk_type",
                                 "entity_type_normalized", "registration_type", "department",
                                 "fees", "operation_duration", "service_channel",
+                                "identification_documents", "operation_steps",
                             })
                             _SUPERVISOR_FC2 = {
-                                "operation_steps": 600, "identification_documents": 700,
+                                "operation_steps": 600, "identification_documents": 1500,
                                 "research_reference": 3200, "fees": 120, "service_channel": 200,
                             }
                             _filtered = []
@@ -1354,11 +1380,13 @@ class PersonaSupervisor:
             "license_type", "operation_topic", "chunk_type",
             "entity_type_normalized", "registration_type", "department",
             "fees", "operation_duration", "service_channel",
-            "legal_regulatory",     # บทลงโทษ ค่าปรับ ข้อกำหนดทางกฎหมาย
-            "terms_and_conditions", # หน้าที่และเงื่อนไขของผู้ประกอบการ
+            "legal_regulatory",           # บทลงโทษ ค่าปรับ ข้อกำหนดทางกฎหมาย
+            "terms_and_conditions",       # หน้าที่และเงื่อนไขของผู้ประกอบการ
+            "identification_documents",   # เอกสารที่ต้องใช้ — must reach LLM complete
+            "operation_steps",            # ขั้นตอนการดำเนินการ
         })
         _SUPERVISOR_FIELD_CAPS = {
-            "operation_steps": 600, "identification_documents": 700,
+            "operation_steps": 600, "identification_documents": 1500,
             "research_reference": 3200, "fees": 120, "service_channel": 200,
             "legal_regulatory": 2000, "terms_and_conditions": 800,
         }
@@ -1539,6 +1567,19 @@ class PersonaSupervisor:
             _cs_lq = {}
             _ctx_slots_lq = {}
             collected_keys = set()
+
+        # Step 2: auto-infer entity_type if explicitly stated in query text
+        _inferred_et_lq = self._infer_entity_type_from_query(query)
+        if _inferred_et_lq and "entity_type" not in collected_keys:
+            state.save_collected_slot("entity_type", _inferred_et_lq)
+            state.context.setdefault("slots", {})["entity_type"] = _inferred_et_lq
+            collected_keys = collected_keys | {"entity_type"}
+            _LOG.info("[Supervisor] legal_q entity_type auto-inferred from query: %r", _inferred_et_lq)
+        # Step 3: skip entity_type/registration_type for universal-fact queries
+        elif not self._entity_slot_needed(query):
+            all_slots = [s for s in all_slots if s["key"] not in ("entity_type", "registration_type")]
+            _LOG.info("[Supervisor] legal_q entity_type/registration_type skipped — universal-fact query: %r", query[:60])
+
         remaining = [s for s in all_slots if s["key"] not in collected_keys]
 
         if not remaining:
@@ -1631,6 +1672,11 @@ class PersonaSupervisor:
 
         if not remaining:
             return
+
+        # Step 4: cap at 2 slots max to prevent question loops
+        if len(remaining) > 2:
+            remaining = remaining[:2]
+            _LOG.info("[Supervisor] legal_q slot_queue capped to 2: %s", [s["key"] for s in remaining])
 
         state.context["topic_slot_queue"] = remaining
         _LOG.info(
@@ -1766,17 +1812,20 @@ class PersonaSupervisor:
         if idxs:
             valid = [i for i in idxs if 1 <= i <= len(options)]
             if not valid:
-                return None, "เลขที่เลือกไม่อยู่ในช่วงตัวเลือกครับ"
+                # topic slot accepts free text — numbers embedded in queries (e.g. "ภพ.20") should not trigger error
+                if key != "topic":
+                    return None, "เลขที่เลือกไม่อยู่ในช่วงตัวเลือกครับ"
+                # for topic: fall through to free-text handling below
+            else:
+                if not allow_multi:
+                    chosen = options[valid[0] - 1]
+                    return str(chosen).strip(), None
 
-            if not allow_multi:
-                chosen = options[valid[0] - 1]
-                return str(chosen).strip(), None
-
-            texts = [str(options[i - 1]).strip() for i in valid]
-            texts = [x for x in texts if x]
-            if not texts:
-                return None, "เลขที่เลือกไม่อยู่ในช่วงตัวเลือกครับ"
-            return ", ".join(texts), None
+                texts = [str(options[i - 1]).strip() for i in valid]
+                texts = [x for x in texts if x]
+                if not texts:
+                    return None, "เลขที่เลือกไม่อยู่ในช่วงตัวเลือกครับ"
+                return ", ".join(texts), None
 
         # 1) exact/contains match against options (fast deterministic)
         raw_norm = self._normalize_for_intent(raw)
@@ -2323,6 +2372,10 @@ class PersonaSupervisor:
                     return g
             return None
 
+        if self._OP_INFER_RENEW_RE.search(q):
+            found = _find_group(["ต่ออายุ", "ต่อ"])
+            if found:
+                return found
         if self._OP_INFER_CANCEL_RE.search(q):
             found = _find_group(["ยกเลิก", "ปิด"])
             if found:
@@ -2336,6 +2389,28 @@ class PersonaSupervisor:
             if found:
                 return found
         return None
+
+    def _infer_entity_type_from_query(self, query: str) -> Optional[str]:
+        """
+        Auto-detect entity type when it is explicitly stated in the query text.
+        Returns 'นิติบุคคล' or 'บุคคลธรรมดา', or None if ambiguous.
+        Used to skip asking entity_type slot when the answer is already in the query.
+        """
+        q = query or ""
+        if self._ENTITY_NITI_RE.search(q):
+            return "นิติบุคคล"
+        if self._ENTITY_NATURAL_RE.search(q):
+            return "บุคคลธรรมดา"
+        return None
+
+    def _entity_slot_needed(self, query: str) -> bool:
+        """
+        Returns False if the entity_type slot should be skipped for this query.
+        Universal-fact queries (e.g. "มีอายุกี่ปี", "หมดอายุไหม") have answers
+        that are identical across entity types — asking entity_type adds no value.
+        Returns True (ask) by default; only False for matched universal-fact patterns.
+        """
+        return not self._UNIVERSAL_FACT_RE.search(query or "")
 
     def _get_operation_groups_for_entity(self, license_type: str, entity_type_normalized: str) -> Tuple[List[str], Dict]:
         """
@@ -2534,7 +2609,7 @@ class PersonaSupervisor:
                             "operation_steps", "identification_documents", "research_reference",
                         })
                         _SUPERVISOR_FC_MT2 = {
-                            "operation_steps": 600, "identification_documents": 700,
+                            "operation_steps": 600, "identification_documents": 1500,
                             "research_reference": 3200, "fees": 120, "service_channel": 200,
                         }
                         _merged_mt2: List[Dict] = []
@@ -2671,7 +2746,7 @@ class PersonaSupervisor:
                     "terms_and_conditions", # หน้าที่และเงื่อนไขของผู้ประกอบการ
                 })
                 _PT_FIELD_CAPS = {
-                    "operation_steps": 600, "identification_documents": 700,
+                    "operation_steps": 600, "identification_documents": 1500,
                     "research_reference": 3200, "fees": 120, "service_channel": 200,
                     "legal_regulatory": 2000, "terms_and_conditions": 800,
                 }
@@ -2720,6 +2795,19 @@ class PersonaSupervisor:
                         break
                 if _license_type_for_slots:
                     _slot_queue = self._discover_slots_for_license(_license_type_for_slots)
+                    # Step 2: auto-infer entity_type if explicitly stated in query text
+                    _q_str_main = str(mapped).strip()
+                    _inferred_et_main = self._infer_entity_type_from_query(_q_str_main)
+                    if _inferred_et_main:
+                        _cs_main = state.get_collected_slots() or {} if hasattr(state, "get_collected_slots") else {}
+                        if not _cs_main.get("entity_type"):
+                            state.save_collected_slot("entity_type", _inferred_et_main)
+                            state.context.setdefault("slots", {})["entity_type"] = _inferred_et_main
+                            _LOG.info("[Supervisor] entity_type auto-inferred from query text: %r", _inferred_et_main)
+                    # Step 3: skip entity_type/registration_type for universal-fact queries
+                    elif not self._entity_slot_needed(_q_str_main):
+                        _slot_queue = [s for s in _slot_queue if s["key"] not in ("entity_type", "registration_type")]
+                        _LOG.info("[Supervisor] entity_type/registration_type skipped — universal-fact query: %r", _q_str_main[:60])
                 else:
                     _slot_queue = []
 
@@ -2829,6 +2917,11 @@ class PersonaSupervisor:
                             _LOG.info("[Supervisor] (new-topic) operation_group already collected — skip")
 
                     _slot_queue = _new_queue
+
+            # Step 4: cap at 2 slots max to prevent question loops
+            if len(_slot_queue) > 2:
+                _slot_queue = _slot_queue[:2]
+                _LOG.info("[Supervisor] slot_queue capped to 2: %s", [s["key"] for s in _slot_queue])
 
             if _slot_queue:
                 state.context["topic_slot_queue"] = _slot_queue
@@ -3098,7 +3191,7 @@ class PersonaSupervisor:
                                 "research_reference",
                             })
                             _SUPERVISOR_FC_RT = {
-                                "operation_steps": 600, "identification_documents": 700,
+                                "operation_steps": 600, "identification_documents": 1500,
                                 "research_reference": 3200, "fees": 120, "service_channel": 200,
                             }
                             _rt_specific: List[Dict] = []
@@ -3211,6 +3304,10 @@ class PersonaSupervisor:
                                 _LOG.info("[Supervisor] operation_group only 1 option (%s) — skip asking", _op_groups)
 
                         if _remaining:
+                            # Step 4: cap at 2 to prevent question loops
+                            if len(_remaining) > 2:
+                                _remaining = _remaining[:2]
+                                _LOG.info("[Supervisor] slot_queue after entity capped to 2: %s", [s["key"] for s in _remaining])
                             state.context["topic_slot_queue"] = _remaining
                             _LOG.info("[Supervisor] topic_slot_queue after entity → remaining: %s",
                                       [s["key"] for s in _remaining])

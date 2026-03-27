@@ -33,6 +33,7 @@ Answer structure:
 Section → DOCUMENTS field mapping (look for these metadata fields when writing each section):
 - ขั้นตอนการดำเนินการ      → metadata.operation_steps
 - เอกสารที่ต้องใช้           → metadata.identification_documents
+  MANDATORY COMPLETENESS: List ALL items from identification_documents as a numbered list — NEVER truncate or abbreviate. Filter to show only documents relevant to the user's entity_type and registration_type from SLOTS. For each document item, add one sentence explaining its purpose (e.g. "ใช้ยืนยันตัวตนของกรรมการ" / "แสดงสิทธิ์การใช้สถานที่"). Format: "1. ชื่อเอกสาร — [วัตถุประสงค์ของเอกสาร]". This section must never be omitted or shortened when user asks about required documents.
 - ค่าธรรมเนียม                → metadata.fees
 - ระยะเวลา                  → metadata.operation_duration
 - ช่องทาง/สถานที่ยื่น         → metadata.service_channel, metadata.service_hours, metadata.service_location
